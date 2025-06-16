@@ -242,11 +242,12 @@ class Phase1Validator:
             start_time = time.time()
             
             # Training loop
-            best_expression = None
+            best_expression_str = None
+            best_complexity = 0
             best_mse = float('inf')
             sample_curve = []
-            
-            total_timesteps = 50000  # Adjust based on complexity
+
+            total_timesteps = 50000
             for timestep in range(0, total_timesteps, 1000):
                 # Get current environment from curriculum
                 current_env = curriculum.get_current_env()
@@ -261,17 +262,20 @@ class Phase1Validator:
                     log_interval=10 if timestep % 10000 == 0 else 100
                 )
                 
-                # Evaluate current best
+                # Evaluate current best from the environment's cache
                 if trainer.episode_mse:
-                    recent = list(trainer.episode_mse)
-                    current_mse = np.mean(recent[-10:]) if len(recent) >= 1 else np.nan
+                    # Get the MSE of the most recently completed episode
+                    current_mse = trainer.episode_mse[-1]
+                    sample_curve.append((timestep, np.mean(list(trainer.episode_mse))))
 
-                    sample_curve.append((timestep, current_mse))
-                    
+                    # Check if this is the best result so far
                     if current_mse < best_mse:
                         best_mse = current_mse
-                        # Extract best expression from environment
-                        # (Would need to add method to track best discovered expression)
+                        # Extract the corresponding expression from the environment's cache
+                        # Note: This relies on the environment's internal state after an episode.
+                        if hasattr(trainer.env, '_evaluation_cache') and trainer.env._evaluation_cache:
+                            best_expression_str = trainer.env._evaluation_cache.get('expression')
+                            best_complexity = trainer.env._evaluation_cache.get('complexity')
                     
                     # Update curriculum
                     success = current_mse < 0.01  # Threshold for success
@@ -291,25 +295,25 @@ class Phase1Validator:
                 max_complexity=config.algo_params['max_complexity']
             )
             
-            # Create result
+            # The primary result is the best law found by the RL agent
             result = ExperimentResult(
                 config=config,
                 run_id=run_id,
-                discovered_law=str(conserved_laws[0].expression.symbolic) if conserved_laws else None,
+                discovered_law=best_expression_str,
                 predictive_mse=best_mse,
+                law_complexity=best_complexity,
                 sample_efficiency_curve=sample_curve,
-                n_experiments_to_convergence=len(sample_curve) * 50,
+                n_experiments_to_convergence=len(sample_curve) * 50 if best_mse < 1e-6 else total_timesteps,
                 wall_time_seconds=time.time() - start_time,
                 trajectory_data=env_data
             )
-            
-            # Calculate symbolic accuracy
-            if conserved_laws:
+
+            # Calculate symbolic accuracy using the discovered law
+            if result.discovered_law:
                 result.symbolic_accuracy = self._calculate_accuracy(
-                    conserved_laws[0].expression.symbolic,
+                    result.discovered_law,
                     physics_env.ground_truth_laws
                 )
-                result.law_complexity = conserved_laws[0].expression.complexity
             
         elif config.algorithm == 'genetic':
             # Run genetic baseline
