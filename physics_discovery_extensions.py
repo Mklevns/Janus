@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import networkx as nx
 from scipy.optimize import minimize
 from sklearn.metrics import mean_squared_error
+import pickle
 
 
 @dataclass
@@ -334,17 +335,49 @@ class SymbolicRegressor:
             selected.append(population[winner_idx])
         
         return selected
+
+    def _get_all_subexpressions(self, expression: 'Expression') -> List['Expression']:
+        """Recursively collect all subexpressions from an expression tree."""
+        nodes = []
+        if isinstance(expression, Expression):
+            nodes.append(expression)
+            for op in expression.operands:
+                nodes.extend(self._get_all_subexpressions(op))
+        return nodes
     
     def _crossover(self,
                   parent1: 'Expression',
                   parent2: 'Expression') -> Optional['Expression']:
-        """Crossover two expressions."""
-        # Simplified crossover - swap random subtrees
-        # In practice, would need more sophisticated implementation
-        if np.random.random() < 0.5:
-            return parent1
-        else:
-            return parent2
+        """Crossover two expressions by swapping subtrees."""
+        # Make copies to avoid modifying the original parents
+        p1_copy = pickle.loads(pickle.dumps(parent1))
+        p2_copy = pickle.loads(pickle.dumps(parent2))
+
+        # Get all possible crossover points (subexpressions)
+        p1_nodes = self._get_all_subexpressions(p1_copy)
+        p2_nodes = self._get_all_subexpressions(p2_copy)
+
+        if not p1_nodes or not p2_nodes:
+            return p1_copy
+
+        # Select random subtrees to swap
+        crossover_point1 = np.random.choice(p1_nodes)
+        crossover_point2 = np.random.choice(p2_nodes)
+
+        # Swap the subtrees by modifying their parent's operand list
+        crossover_point1.operator, crossover_point2.operator = (
+            crossover_point2.operator,
+            crossover_point1.operator,
+        )
+        crossover_point1.operands, crossover_point2.operands = (
+            crossover_point2.operands,
+            crossover_point1.operands,
+        )
+
+        # Recalculate complexity and symbolic form
+        p1_copy.__post_init__()
+
+        return p1_copy
     
     def _mutate(self,
                expression: 'Expression',
