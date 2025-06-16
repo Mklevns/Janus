@@ -81,12 +81,57 @@ class Expression:
                 return args[0] / denominator
             elif self.operator == '**':
                 return args[0] ** args[1]
+        elif self.operator in ['neg', 'inv', 'sqrt', 'log', 'exp', 'sin', 'cos']:
+            # Unary operators
+            operand_val = self.operands[0]
+            if isinstance(operand_val, Expression):
+                arg = operand_val.symbolic
+            elif hasattr(operand_val, 'symbolic'):  # Variable
+                arg = operand_val.symbolic
+            else:  # Constant
+                arg = sp.Float(operand_val)
+
+            if self.operator == 'neg':
+                return -arg
+            elif self.operator == 'inv':
+                if ((isinstance(arg, (int, float, sp.Integer, sp.Float)) and arg == 0)
+                        or (isinstance(arg, sp.Expr) and arg.is_zero is True)):
+                    return sp.nan
+                return 1 / arg
+            elif self.operator == 'sqrt':
+                return sp.sqrt(arg)
+            elif self.operator == 'log':
+                return sp.log(arg)
+            elif self.operator == 'exp':
+                return sp.exp(arg)
+            elif self.operator == 'sin':
+                return sp.sin(arg)
+            elif self.operator == 'cos':
+                return sp.cos(arg)
         elif self.operator == 'diff':
-            expr, var = self.operands
-            return sp.diff(expr.symbolic, var.symbolic)
+            expr_op, var_op = self.operands
+            # First operand can be Expression, Variable, or constant
+            if isinstance(expr_op, Expression):
+                sym_expr = expr_op.symbolic
+            elif hasattr(expr_op, 'symbolic'): # Variable
+                sym_expr = expr_op.symbolic
+            else: # Constant
+                sym_expr = sp.Float(expr_op)
+            # Second operand must be a Variable (ensured by _validate_expression)
+            sym_var = var_op.symbolic
+            return sp.diff(sym_expr, sym_var)
         elif self.operator == 'int':
-            expr, var = self.operands
-            return sp.integrate(expr.symbolic, var.symbolic)
+            expr_op, var_op = self.operands
+            # First operand can be Expression, Variable, or constant
+            if isinstance(expr_op, Expression):
+                sym_expr = expr_op.symbolic
+            elif hasattr(expr_op, 'symbolic'): # Variable
+                sym_expr = expr_op.symbolic
+            else: # Constant
+                sym_expr = sp.Float(expr_op)
+            # Second operand must be a Variable (ensured by _validate_expression)
+            sym_var = var_op.symbolic
+            return sp.integrate(sym_expr, sym_var)
         # Fallback
         return sp.Symbol(f"Unknown({self.operator})")
 
@@ -357,24 +402,30 @@ class ProgressiveGrammar:
         if operator not in all_ops:
             return False
 
-        # Check arity
+        # Arity and Type checking
         if operator in self.primitives['binary_ops']:
-            if len(operands) != 2:
-                return False
+            if len(operands) != 2: return False
+            for op_val in operands:
+                if not isinstance(op_val, (Expression, Variable, int, float)): return False
         elif operator in self.primitives['unary_ops']:
-            if len(operands) != 1:
-                return False
+            if len(operands) != 1: return False
+            for op_val in operands: # All unary ops take these types for now
+                if not isinstance(op_val, (Expression, Variable, int, float)): return False
         elif operator in self.primitives['calculus_ops']:
-            if len(operands) != 2:  # expression and variable
-                return False
-            # Second operand must be a variable for calculus ops
-            if not isinstance(operands[1], Variable):
-                return False
-
-        # Type checking for operands
-        for op in operands:
-            if not isinstance(op, (Expression, Variable, int, float)):
-                return False
+            if len(operands) != 2: return False
+            # First operand (expression to be differentiated/integrated)
+            if not isinstance(operands[0], (Expression, Variable, int, float)): return False
+            # Second operand (variable of differentiation/integration)
+            if not isinstance(operands[1], Variable): return False
+        elif operator == 'var':
+            if len(operands) != 1: return False
+            if not isinstance(operands[0], str): return False
+        elif operator == 'const':
+            if len(operands) != 1: return False
+            if not isinstance(operands[0], (int, float)): return False
+        else:
+            # Should not be reached if operator is in all_ops
+            return False
 
         return True
 
