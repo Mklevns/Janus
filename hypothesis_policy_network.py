@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Deque, Any
 from dataclasses import dataclass
 import torch.optim as optim
 from collections import deque
@@ -419,17 +419,25 @@ class PPOTrainer:
         self.rollout_buffer = RolloutBuffer()
         
         # Logging
-        self.episode_rewards = deque(maxlen=100)
-        self.episode_complexities = deque(maxlen=100)
-        self.episode_mse = deque(maxlen=100)
+        self.episode_rewards: Deque[float] = deque(maxlen=100)
+        self.episode_complexities: Deque[int] = deque(maxlen=100)
+        self.episode_mse: Deque[float] = deque(maxlen=100)
         
-    def collect_rollouts(self, n_steps: int) -> Dict[str, List]:
-        """Collect experience by interacting with environment."""
+    def collect_rollouts(self, n_steps: int) -> Dict[str, List[Any]]:
+        """
+        Collect experience by interacting with environment.
+
+        Returns a dict like:
+          {
+            "rollouts": List[Dict[str, Any]],
+            "episode_stats": List[Dict[str, float]]
+          }
+        """
         self.rollout_buffer.reset()
-        
+
         obs, _ = self.env.reset()
-        episode_reward = 0
-        episode_length = 0
+        episode_reward: float = 0.0
+        episode_length: int = 0
         
         for step in range(n_steps):
             obs_tensor = torch.FloatTensor(obs).unsqueeze(0)
@@ -450,14 +458,14 @@ class PPOTrainer:
             self.rollout_buffer.add(
                 obs=obs,
                 action=action,
-                reward=reward,
+                reward=reward,  # reward is float
                 value=value.item(),
                 log_prob=log_prob.item(),
                 done=terminated or truncated,
                 action_mask=action_mask
             )
-            
-            episode_reward += reward
+
+            episode_reward += reward  # now both sides are float
             episode_length += 1
             
             if terminated or truncated:
