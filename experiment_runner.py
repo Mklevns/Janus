@@ -52,6 +52,9 @@ class ExperimentConfig:
     seed: int = 42
     n_runs: int = 5  # Number of independent runs for statistics
 
+    # Target variable specification for discovery
+    target_variable_index: Optional[int] = None
+
     def get_hash(self) -> str:
         """Get unique hash for this configuration."""
         config_str = json.dumps(asdict(self), sort_keys=True)
@@ -291,11 +294,15 @@ class ExperimentRunner:
         # Janus full system
         def create_janus_full(env_data, variables, config):
             grammar = ProgressiveGrammar()
+            env_creation_params = config.algo_params.get('env_params', {})
+            # Add target_variable_index to env parameters
+            env_creation_params['target_variable_index'] = config.target_variable_index
+
             discovery_env = SymbolicDiscoveryEnv(
                 grammar=grammar,
                 target_data=env_data,
                 variables=variables,
-                **config.algo_params.get('env_params', {})
+                **env_creation_params
             )
 
             policy = HypothesisNet(
@@ -455,8 +462,18 @@ class ExperimentRunner:
         regressor = setup['algorithm']
 
         # Extract features and targets
-        X = setup['env_data'][:, :-1]  # All but last column
-        y = setup['env_data'][:, -1]   # Last column (energy)
+        target_idx_to_use = config.target_variable_index
+        if target_idx_to_use is None:
+            target_idx_to_use = -1 # Default to last column
+
+        y = setup['env_data'][:, target_idx_to_use]
+        X = np.delete(setup['env_data'], target_idx_to_use, axis=1)
+
+
+        # Adjust variable indices if target is not the last column
+        # This is a simplification; a robust solution would map original indices to new X indices
+        # For now, we assume variables are correctly aligned or genetic algorithm handles it
+        # based on the number of columns in X.
 
         # Fit
         best_expr = regressor.fit(

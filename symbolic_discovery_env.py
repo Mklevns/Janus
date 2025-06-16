@@ -169,7 +169,8 @@ class SymbolicDiscoveryEnv(gym.Env):
         max_depth: int = 10,
         max_complexity: int = 30,
         reward_config: Optional[Dict[str, Any]] = None,
-        max_nodes: int = 50
+        max_nodes: int = 50,
+        target_variable_index: Optional[int] = None
     ):
         super().__init__()
         self.grammar = grammar
@@ -178,6 +179,15 @@ class SymbolicDiscoveryEnv(gym.Env):
         self.max_depth = max_depth
         self.max_complexity = max_complexity
         self.max_nodes = max_nodes
+        self.target_variable_index = target_variable_index if target_variable_index is not None else -1
+        # Ensure target_variable_index is a valid integer index for array slicing
+        if self.target_variable_index == -1:
+            self.target_variable_index = self.target_data.shape[1] - 1
+        elif not isinstance(self.target_variable_index, int) or \
+             not (0 <= self.target_variable_index < self.target_data.shape[1]):
+            raise ValueError(f"Invalid target_variable_index: {self.target_variable_index}. "
+                             f"Must be an int within data bounds [0, {self.target_data.shape[1] -1}] or None/-1 for last column.")
+
         default_reward_config = {
             'completion_bonus':    0.1,
             'validity_bonus':      0.05,
@@ -263,17 +273,15 @@ class SymbolicDiscoveryEnv(gym.Env):
             return self.reward_config.get('timeout_penalty', -1.0)
         if expr.complexity > self.max_complexity:
             return self.reward_config.get('complexity_penalty', -0.01) * expr.complexity
-        n_samples = min(100, len(self.target_data))
-        idx = np.random.choice(len(self.target_data), n_samples, replace=False)
         preds, tars = [], []
-        for i in idx:
+        for i in range(len(self.target_data)):
             subs = {v.symbolic: self.target_data[i, v.index] for v in self.variables}
             try:
                 p = float(expr.symbolic.subs(subs))
-                preds.append(p); tars.append(self.target_data[i, -1])
+                preds.append(p); tars.append(self.target_data[i, self.target_variable_index])
             except:
                 return self.reward_config.get('timeout_penalty', -1.0)
-        if len(preds) < n_samples // 2:
+        if len(preds) < len(self.target_data) // 2:
             return self.reward_config.get('timeout_penalty', -1.0)
         preds, tars = np.array(preds), np.array(tars)
         mse = np.mean((preds - tars)**2)
