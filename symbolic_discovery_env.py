@@ -1,0 +1,350 @@
+"""
+Symbolic Discovery Environment
+==============================
+
+A reinforcement learning environment for intelligent hypothesis generation.
+Transforms the combinatorial search problem into a sequential decision process.
+"""
+
+import numpy as np
+import torch
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass, field
+from enum import Enum
+from collections import deque
+import gymnasium as gym
+from gymnasium import spaces
+
+
+def float_cast(val):
+    """Ensure native Python float for torch assignment."""
+    try:
+        return float(val)
+    except Exception:
+        return float(val.item()) if hasattr(val, 'item') else 0.0
+
+class NodeType(Enum):
+    """Types of nodes in expression tree."""
+    EMPTY = "empty"
+    OPERATOR = "operator"
+    VARIABLE = "variable"
+    CONSTANT = "constant"
+    COMPLETE = "complete"
+
+@dataclass
+class ExpressionNode:
+    """Node in the expression tree being constructed."""
+    node_type: NodeType
+    value: Any
+    children: List['ExpressionNode'] = field(default_factory=list)
+    parent: Optional['ExpressionNode'] = None
+    depth: int = 0
+    position: int = 0
+
+    def is_complete(self) -> bool:
+        if self.node_type in (NodeType.VARIABLE, NodeType.CONSTANT):
+            return True
+        if self.node_type == NodeType.EMPTY:
+            return False
+        expected = self._expected_children()
+        return len(self.children) == expected and all(c.is_complete() for c in self.children)
+
+    def _expected_children(self) -> int:
+        if self.node_type != NodeType.OPERATOR:
+            return 0
+        binary = {'+', '-', '*', '/', '**'}
+        unary = {'neg', 'inv', 'sqrt', 'log', 'exp', 'sin', 'cos'}
+        calculus = {'diff', 'int'}
+        if self.value in binary:
+            return 2
+        if self.value in unary:
+            return 1
+        if self.value in calculus:
+            return 2
+        return 0
+
+    def to_expression(self, grammar) -> Optional[Any]:
+        if not self.is_complete():
+            return None
+        if self.node_type == NodeType.VARIABLE:
+            return self.value
+        if self.node_type == NodeType.CONSTANT:
+            return grammar.create_expression('const', [self.value])
+        if self.node_type == NodeType.OPERATOR:
+            args = [c.to_expression(grammar) for c in self.children]
+            if all(args):
+                return grammar.create_expression(self.value, args)
+        return None
+
+class TreeState:
+    """Represents the current state of expression tree construction."""
+    def __init__(self, root: Optional[ExpressionNode] = None, max_depth: int = 10):
+        self.root = root or ExpressionNode(NodeType.EMPTY, None)
+        self.max_depth = max_depth
+        self.construction_history: List[Dict[str, Any]] = []
+
+    def get_next_empty_node(self) -> Optional[ExpressionNode]:
+        return self._find_empty(self.root)
+
+    def _find_empty(self, node: ExpressionNode) -> Optional[ExpressionNode]:
+        if node.node_type == NodeType.EMPTY:
+            return node
+        for c in node.children:
+            res = self._find_empty(c)
+            if res:
+                return res
+        return None
+
+    def is_complete(self) -> bool:
+        return self.root.is_complete()
+
+    def count_nodes(self) -> int:
+        return self._count(self.root)
+
+    def _count(self, node: ExpressionNode) -> int:
+        if node.node_type == NodeType.EMPTY:
+            return 0
+        return 1 + sum(self._count(c) for c in node.children)
+
+    def to_tensor_representation(self, grammar, max_nodes: int = 50) -> torch.Tensor:
+        feature_dim = 128
+        tensor = torch.zeros((max_nodes, feature_dim), dtype=torch.float32)
+        nodes = []
+        queue = deque([self.root])
+        while queue and len(nodes) < max_nodes:
+            n = queue.popleft()
+            nodes.append(n)
+            queue.extend(n.children)
+        for i, node in enumerate(nodes):
+            if node.node_type == NodeType.EMPTY:
+                tensor[i, 0] = 1.0
+            elif node.node_type == NodeType.OPERATOR:
+                tensor[i, 1] = 1.0
+                all_ops = list(
+                    grammar.primitives.get('binary_ops', set()) |
+                    grammar.primitives.get('unary_ops', set()) |
+                    grammar.primitives.get('calculus_ops', set())
+                )
+                if node.value in all_ops:
+                    idx = all_ops.index(node.value)
+                    tensor[i, 10 + idx] = 1.0
+            elif node.node_type == NodeType.VARIABLE:
+                tensor[i, 2] = 1.0
+                if hasattr(node.value, 'properties'):
+                    for j, (_, v) in enumerate(node.value.properties.items()):
+                        if j < 10:
+                            tensor[i, 50 + j] = float_cast(v)
+            elif node.node_type == NodeType.CONSTANT:
+                tensor[i, 3] = 1.0
+                tensor[i, 60] = float_cast(node.value)
+            tensor[i, 70] = float_cast(node.depth)
+            tensor[i, 71] = float_cast(node.position)
+            tensor[i, 72] = float_cast(len(node.children))
+        return tensor
+
+def _build_action_space(grammar, variables):
+    actions: List[Tuple[str, Any]] = []
+    for op_type in ['binary_ops', 'unary_ops', 'calculus_ops']:
+        actions.extend(('operator', op) for op in grammar.primitives.get(op_type, []))
+    actions.extend(('variable', var) for var in variables)
+    consts = [
+        ('constant', 0.0),
+        ('constant', 1.0),
+        ('constant', -1.0),
+        ('constant', 'random_small'),
+        ('constant', 'random_large'),
+    ]
+    actions.extend(consts)
+    actions.extend(('function', fn) for fn in grammar.learned_functions)
+    return actions
+
+class SymbolicDiscoveryEnv(gym.Env):
+    metadata = {'render.modes': ['human']}
+    def __init__(
+        self,
+        grammar: Any,
+        target_data: np.ndarray,
+        variables: List[Any],
+        max_depth: int = 10,
+        max_complexity: int = 30,
+        reward_config: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__()
+        self.grammar = grammar
+        self.target_data = target_data
+        self.variables = variables
+        self.max_depth = max_depth
+        self.max_complexity = max_complexity
+        default_reward_config = {
+            'completion_bonus':    0.1,
+            'validity_bonus':      0.05,
+            'mse_weight':         -1.0,
+            'complexity_penalty': -0.01,
+            'depth_penalty':      -0.001,
+            'timeout_penalty':    -1.0,
+        }
+        self.reward_config = {**default_reward_config, **(reward_config or {})}
+        self.current_state = TreeState(max_depth=max_depth)
+        self.steps_taken = 0
+        self.max_steps = 100
+        self._evaluation_cache: Dict[str, Any] = {}
+        self.action_to_element = _build_action_space(grammar, variables)
+        self.action_space = spaces.Discrete(len(self.action_to_element))
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(self.max_depth * 128,),
+            dtype=np.float32
+        )
+    def reset(self, seed: Optional[int] = None, options=None) -> Tuple[np.ndarray, Dict]:
+        super().reset(seed=seed)
+        if seed is not None:
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+        self.current_state = TreeState(max_depth=self.max_depth)
+        self.steps_taken = 0
+        self._evaluation_cache.clear()
+        obs = self._get_observation()
+        info = self._get_info()
+        return obs, info
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+        self.steps_taken += 1
+        node = self.current_state.get_next_empty_node()
+        if not node:
+            return self._get_observation(), 0.0, True, False, self._get_info()
+        a_type, a_val = self.action_to_element[action]
+        if not self._is_valid_action(node, a_type, a_val):
+            return self._get_observation(), -0.05, False, False, self._get_info()
+        self._apply_action(node, a_type, a_val)
+        if self.current_state.is_complete():
+            reward = self._evaluate_expression()
+            terminated = True
+        else:
+            reward = self.reward_config.get('validity_bonus', 0.0)
+            terminated = False
+        truncated = self.steps_taken >= self.max_steps
+        if truncated and not terminated:
+            reward += self.reward_config.get('timeout_penalty', 0.0)
+        obs = self._get_observation()
+        info = self._get_info()
+        return obs, reward, terminated, truncated, info
+    def _is_valid_action(self, node, a_type, a_val) -> bool:
+        depth = node.depth
+        if depth >= self.max_depth and a_type not in ('variable', 'constant'):
+            return False
+        return True
+    def _apply_action(self, node, a_type, a_val):
+        if a_type in ('operator', 'function'):
+            node.node_type = NodeType.OPERATOR
+            node.value = a_val
+            for i in range(node._expected_children()):
+                child = ExpressionNode(NodeType.EMPTY, None, parent=node, depth=node.depth+1, position=i)
+                node.children.append(child)
+        elif a_type == 'variable':
+            node.node_type = NodeType.VARIABLE
+            node.value = a_val
+        elif a_type == 'constant':
+            node.node_type = NodeType.CONSTANT
+            if a_val == 'random_small':
+                node.value = np.random.randn()
+            elif a_val == 'random_large':
+                node.value = np.random.randn() * 10
+            else:
+                node.value = a_val
+        self.current_state.construction_history.append({
+            'step': self.steps_taken, 'action_type': a_type, 'action_value': str(a_val)
+        })
+    def _evaluate_expression(self) -> float:
+        expr = self.current_state.root.to_expression(self.grammar)
+        if not expr:
+            return self.reward_config.get('timeout_penalty', -1.0)
+        if expr.complexity > self.max_complexity:
+            return self.reward_config.get('complexity_penalty', -0.01) * expr.complexity
+        n_samples = min(100, len(self.target_data))
+        idx = np.random.choice(len(self.target_data), n_samples, replace=False)
+        preds, tars = [], []
+        for i in idx:
+            subs = {v.symbolic: self.target_data[i, v.index] for v in self.variables}
+            try:
+                p = float(expr.symbolic.subs(subs))
+                preds.append(p); tars.append(self.target_data[i, -1])
+            except:
+                return self.reward_config.get('timeout_penalty', -1.0)
+        if len(preds) < n_samples // 2:
+            return self.reward_config.get('timeout_penalty', -1.0)
+        preds, tars = np.array(preds), np.array(tars)
+        mse = np.mean((preds - tars)**2)
+        norm = mse / (np.var(tars) + 1e-10)
+        reward = (
+            self.reward_config.get('completion_bonus', 0.1) +
+            self.reward_config.get('mse_weight', -1.0) * np.log(norm + 1e-10) +
+            self.reward_config.get('complexity_penalty', -0.01) * expr.complexity +
+            self.reward_config.get('depth_penalty', -0.001) * self.max_depth
+        )
+        self._evaluation_cache.update({'expression': str(expr.symbolic), 'mse': mse,
+                                       'complexity': expr.complexity, 'reward': reward})
+        return float(reward)
+    def _get_observation(self) -> np.ndarray:
+        tensor = self.current_state.to_tensor_representation(self.grammar, max_nodes=self.max_depth)
+        return tensor.flatten().numpy()
+    def _get_info(self) -> Dict[str, Any]:
+        info = {'steps': self.steps_taken, 'nodes': self.current_state.count_nodes(),
+                'complete': self.current_state.is_complete()}
+        info.update(self._evaluation_cache)
+        return info
+    def render(self, mode='human'):
+        print(f"Step {self.steps_taken}: Nodes {self.current_state.count_nodes()}")
+        if self.current_state.is_complete():
+            expr = self.current_state.root.to_expression(self.grammar)
+            if expr:
+                print(f"Expr: {expr.symbolic} Comp:{expr.complexity}")
+    def get_action_mask(self) -> np.ndarray:
+        empty_node = self.current_state.get_next_empty_node()
+        if not empty_node:
+            return np.zeros(self.action_space.n, dtype=bool)
+        mask = np.zeros(self.action_space.n, dtype=bool)
+        for i, (atype, aval) in enumerate(self.action_to_element):
+            if self._is_valid_action(empty_node, atype, aval): mask[i] = True
+        return mask
+
+class CurriculumManager:
+    """Manages curriculum learning for expression discovery."""
+    def __init__(self, base_env: SymbolicDiscoveryEnv):
+        self.base_env = base_env
+        self.difficulty_level = 0
+        self.success_rate_history = deque(maxlen=100)
+        self.curriculum = [
+            {'max_depth':3, 'max_complexity':5},
+            {'max_depth':5, 'max_complexity':10},
+            {'max_depth':7, 'max_complexity':15},
+            {'max_depth':10, 'max_complexity':30},
+        ]
+    def get_current_env(self) -> SymbolicDiscoveryEnv:
+        cfg = self.curriculum[self.difficulty_level]
+        self.base_env.max_depth = cfg['max_depth']
+        self.base_env.max_complexity = cfg['max_complexity']
+        return self.base_env
+    def update_curriculum(self, episode_success: bool):
+        self.success_rate_history.append(float(episode_success))
+        if len(self.success_rate_history) >= 50:
+            rate = np.mean(self.success_rate_history)
+            if rate > 0.7 and self.difficulty_level < len(self.curriculum)-1:
+                self.difficulty_level += 1; self.success_rate_history.clear()
+            elif rate < 0.3 and self.difficulty_level > 0:
+                self.difficulty_level -= 1; self.success_rate_history.clear()
+
+if __name__ == "__main__":
+    from progressive_grammar_system import ProgressiveGrammar, Variable
+    grammar = ProgressiveGrammar()
+    var_x = Variable("x", 0, {"smoothness":0.9})
+    variables = [var_x]
+    n = 1000; x = np.random.randn(n); y = 2*x + 1; data = np.column_stack([x, y])
+    env = SymbolicDiscoveryEnv(grammar, data, variables)
+    obs, info = env.reset()
+    for _ in range(5):
+        mask = env.get_action_mask()
+        a = np.random.choice(np.where(mask)[0])
+        obs, rew, done, truncated, info = env.step(a)
+        print(rew)
+
+__all__ = ["SymbolicDiscoveryEnv", "CurriculumManager"]
