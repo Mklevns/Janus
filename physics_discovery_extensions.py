@@ -201,17 +201,31 @@ class SymbolicRegressor:
                     # Crossover
                     parent1 = np.random.choice(selected)
                     parent2 = np.random.choice(selected)
-                    child = self._crossover(parent1, parent2)
+                    # _crossover now returns two children
+                    child1, child2 = self._crossover(parent1, parent2)
+
+                    children_to_process = []
+                    if child1:
+                        children_to_process.append(child1)
+                    if child2:
+                        children_to_process.append(child2)
                 else:
                     # Direct reproduction
-                    child = np.random.choice(selected)
+                    # Create a list to have a consistent processing path
+                    children_to_process = [np.random.choice(selected)]
                 
-                # Mutation
-                if np.random.random() < self.mutation_rate:
-                    child = self._mutate(child, variables)
-                
-                if child and child.complexity <= max_complexity:
-                    next_population.append(child)
+                for child_candidate in children_to_process:
+                    if len(next_population) >= self.population_size:
+                        break # Stop if population is full
+
+                    mutated_child = child_candidate # Initialize with the candidate
+                    # Mutation
+                    if np.random.random() < self.mutation_rate:
+                        # _mutate returns a new mutated expression or the original if mutation failed
+                        mutated_child = self._mutate(child_candidate, variables)
+
+                    if mutated_child and mutated_child.complexity <= max_complexity:
+                        next_population.append(mutated_child)
             
             population = next_population
         
@@ -347,7 +361,7 @@ class SymbolicRegressor:
     
     def _crossover(self,
                   parent1: 'Expression',
-                  parent2: 'Expression') -> Optional['Expression']:
+                  parent2: 'Expression') -> Tuple[Optional['Expression'], Optional['Expression']]:
         """Crossover two expressions by swapping subtrees."""
         # Make copies to avoid modifying the original parents
         p1_copy = pickle.loads(pickle.dumps(parent1))
@@ -358,13 +372,18 @@ class SymbolicRegressor:
         p2_nodes = self._get_all_subexpressions(p2_copy)
 
         if not p1_nodes or not p2_nodes:
-            return p1_copy
+            # If crossover is not possible (e.g., one parent is a terminal),
+            # return copies of the original parents.
+            return p1_copy, p2_copy
 
         # Select random subtrees to swap
+        # Ensure that we are selecting actual subexpressions, not terminals if they cannot be swapped meaningfully.
+        # For simplicity, we assume _get_all_subexpressions returns swappable nodes.
         crossover_point1 = np.random.choice(p1_nodes)
         crossover_point2 = np.random.choice(p2_nodes)
 
-        # Swap the subtrees by modifying their parent's operand list
+        # Swap the operator and operands attributes of the selected nodes.
+        # This effectively swaps the subtrees rooted at these nodes.
         crossover_point1.operator, crossover_point2.operator = (
             crossover_point2.operator,
             crossover_point1.operator,
@@ -374,10 +393,17 @@ class SymbolicRegressor:
             crossover_point1.operands,
         )
 
-        # Recalculate complexity and symbolic form
-        p1_copy.__post_init__()
+        # Call __post_init__ on the modified crossover points first
+        if hasattr(crossover_point1, '__post_init__'):
+            crossover_point1.__post_init__()
+        if hasattr(crossover_point2, '__post_init__'):
+            crossover_point2.__post_init__()
 
-        return p1_copy
+        # Recalculate complexity and symbolic form for both modified expressions
+        p1_copy.__post_init__()
+        p2_copy.__post_init__()
+
+        return p1_copy, p2_copy
     
     def _mutate(self,
                expression: 'Expression',
