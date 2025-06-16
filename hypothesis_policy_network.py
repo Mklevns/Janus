@@ -198,13 +198,15 @@ class HypothesisNet(nn.Module):
                  action_dim: int,
                  hidden_dim: int = 256,
                  encoder_type: str = 'transformer',
-                 grammar: Optional['ProgressiveGrammar'] = None):
+                 grammar: Optional['ProgressiveGrammar'] = None,
+                 debug: bool = False):
         super().__init__()
         
         self.observation_dim = observation_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         self.grammar = grammar
+        self.debug = debug
         
         # Unflatten observation to tree representation
         self.node_feature_dim = 128
@@ -268,15 +270,17 @@ class HypothesisNet(nn.Module):
 
         Returns dict with 'policy_logits', 'value', 'action_probs'
         """
-        # DEBUG: print out dims so we know what's actually happening
-        print(f"[DEBUG] max_nodes={self.max_nodes}, "
-              f"node_feature_dim={self.node_feature_dim}, "
-              f"obs_size={observation.numel()}")
+        if self.debug:
+            # DEBUG: print out dims so we know what's actually happening
+            print(f"[DEBUG] max_nodes={self.max_nodes}, "
+                  f"node_feature_dim={self.node_feature_dim}, "
+                  f"obs_size={observation.numel()}")
 
         batch_size, obs_dim = observation.shape
         # Dynamically infer how many nodes are present
         num_nodes = obs_dim // self.node_feature_dim
-        print(f"[DEBUG] computed num_nodes={num_nodes}, node_feature_dim={self.node_feature_dim}, obs_size={obs_dim}")
+        if self.debug:
+            print(f"[DEBUG] computed num_nodes={num_nodes}, node_feature_dim={self.node_feature_dim}, obs_size={obs_dim}")
         # Now reshape correctly (e.g. (1,3,128) for obs_size=384)
         tree_features = observation.view(
             batch_size,
