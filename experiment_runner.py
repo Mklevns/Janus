@@ -488,7 +488,7 @@ class ExperimentRunner:
                 diff = sp.simplify(discovered_expr - truth_expr)
                 
                 # If difference is zero, perfect match
-                if diff == 0:
+                if diff.equals(0):
                     return 1.0
                 
                 # Otherwise, calculate structural similarity
