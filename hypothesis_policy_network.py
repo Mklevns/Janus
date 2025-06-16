@@ -78,49 +78,96 @@ class TreeLSTMCell(nn.Module):
 
 class TreeEncoder(nn.Module):
     """Encodes partial expression trees using TreeLSTM."""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  node_feature_dim: int,
                  hidden_dim: int,
                  n_layers: int = 2):
         super().__init__()
-        
+
         self.node_embedding = nn.Linear(node_feature_dim, hidden_dim)
         self.tree_cells = nn.ModuleList([
             TreeLSTMCell(hidden_dim, hidden_dim) for _ in range(n_layers)
         ])
         self.hidden_dim = hidden_dim
-        
-    def forward(self, tree_features: torch.Tensor) -> torch.Tensor:
+
+    def forward(
+        self,
+        tree_features: torch.Tensor,
+        tree_structure: Optional[Dict[int, List[int]]] = None,
+    ) -> torch.Tensor:
+        """Encode a tree represented as a tensor with optional structure.
+
+        Parameters
+        ----------
+        tree_features : torch.Tensor
+            Tensor of shape ``(batch_size, max_nodes, feature_dim)`` containing
+            node features in topological order (children before parents).
+        tree_structure : dict[int, list[int]] | None, optional
+            Mapping from node index to indices of its children. If ``None`` the
+            nodes are processed sequentially without structural information.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of shape ``(batch_size, hidden_dim)`` representing the root
+            node.
         """
-        Encode tree represented as tensor.
-        tree_features: (batch_size, max_nodes, feature_dim)
-        Returns: (batch_size, hidden_dim)
-        """
-        # Simplified: Process as sequence for now
-        # In full implementation, would traverse actual tree structure
+
         batch_size, max_nodes, _ = tree_features.shape
-        
-        # Embed nodes
+
+        # Embed nodes once
         node_embeds = self.node_embedding(tree_features)  # (B, N, H)
-        
-        # Apply TreeLSTM layers (simplified as sequential for now)
-        h = node_embeds
+
+        # Fallback: sequential processing when no structure is provided
+        if tree_structure is None:
+            h = node_embeds
+            for cell in self.tree_cells:
+                h_states = []
+                for i in range(max_nodes):
+                    h_i, _ = cell(h[:, i, :], [], [])
+                    h_states.append(h_i)
+                h = torch.stack(h_states, dim=1)
+            return torch.mean(h, dim=1)
+
+        # Structured processing using post-order traversal
+        def run_layer(layer_input, cell):
+            node_hidden_states: Dict[int, torch.Tensor] = {}
+            node_cell_states: Dict[int, torch.Tensor] = {}
+
+            def traverse(node_idx: int):
+                if node_idx in node_hidden_states:
+                    return node_hidden_states[node_idx], node_cell_states[node_idx]
+
+                children_indices = tree_structure.get(node_idx, [])
+                children_h = []
+                children_c = []
+                for child_idx in children_indices:
+                    h_child, c_child = traverse(child_idx)
+                    children_h.append(h_child)
+                    children_c.append(c_child)
+
+                node_input = layer_input[:, node_idx, :]
+                h, c = cell(node_input, children_h, children_c)
+
+                node_hidden_states[node_idx] = h
+                node_cell_states[node_idx] = c
+                return h, c
+
+            root_h, root_c = traverse(0)
+
+            # Collect hidden states for all nodes to feed to next layer
+            ordered_h = [node_hidden_states.get(i, layer_input.new_zeros(batch_size, self.hidden_dim))
+                         for i in range(max_nodes)]
+            stacked_h = torch.stack(ordered_h, dim=1)
+            return root_h, stacked_h
+
+        h_layer = node_embeds
+        root_h = None
         for cell in self.tree_cells:
-            h_states = []
-            c_states = []
-            
-            for i in range(max_nodes):
-                h_i, c_i = cell(h[:, i, :], [], [])
-                h_states.append(h_i)
-                c_states.append(c_i)
-            
-            h = torch.stack(h_states, dim=1)
-        
-        # Pool to get tree representation
-        tree_repr = torch.mean(h, dim=1)  # (B, H)
-        
-        return tree_repr
+            root_h, h_layer = run_layer(h_layer, cell)
+
+        return root_h
 
 
 class TransformerEncoder(nn.Module):
@@ -210,7 +257,6 @@ class HypothesisNet(nn.Module):
         
         # Unflatten observation to tree representation
         self.node_feature_dim = 128
-        self.max_nodes = observation_dim // self.node_feature_dim
         
         # Choose encoder
         if encoder_type == 'transformer':
@@ -272,9 +318,10 @@ class HypothesisNet(nn.Module):
         """
         if self.debug:
             # DEBUG: print out dims so we know what's actually happening
-            print(f"[DEBUG] max_nodes={self.max_nodes}, "
-                  f"node_feature_dim={self.node_feature_dim}, "
-                  f"obs_size={observation.numel()}")
+            print(
+                f"[DEBUG] node_feature_dim={self.node_feature_dim}, "
+                f"obs_size={observation.numel()}"
+            )
 
         batch_size, obs_dim = observation.shape
         # Dynamically infer how many nodes are present
