@@ -364,35 +364,47 @@ class Phase1Validator:
         
         return result
     
-    def _calculate_accuracy(self, discovered, ground_truth_dict):
-        """Calculate symbolic accuracy against ground truth."""
+    def _count_operations(self, expr) -> dict:
+        """Count operations in a SymPy expression."""
         import sympy as sp
-        
-        max_accuracy = 0.0
-        for law_name, truth_expr in ground_truth_dict.items():
-            try:
-                # Simplify difference
-                diff = sp.simplify(discovered - truth_expr)
-                if diff == 0:
+        ops = {}
+        for arg in sp.preorder_traversal(expr):
+            if arg.is_Function or arg.is_Add or arg.is_Mul or arg.is_Pow:
+                op_name = type(arg).__name__
+                ops[op_name] = ops.get(op_name, 0) + 1
+        return ops
+
+    def _calculate_accuracy(self, discovered: str, ground_truth_dict: dict) -> float:
+        """Calculate similarity between discovered and ground truth expressions."""
+        import sympy as sp
+
+        if not discovered:
+            return 0.0
+
+        try:
+            discovered_expr = sp.sympify(discovered)
+
+            max_similarity = 0.0
+            for law_name, truth_expr in ground_truth_dict.items():
+                # Check for perfect match after simplification
+                if sp.simplify(discovered_expr - truth_expr) == 0:
                     return 1.0
-                
-                # Structural similarity
-                disc_str = str(discovered)
-                truth_str = str(truth_expr)
-                
-                # Simple similarity metric
-                common_terms = 0
-                for term in truth_str.split():
-                    if term in disc_str:
-                        common_terms += 1
-                
-                similarity = common_terms / len(truth_str.split())
-                max_accuracy = max(max_accuracy, similarity)
-                
-            except:
-                pass
-        
-        return max_accuracy
+
+                # Otherwise, calculate structural similarity
+                discovered_ops = self._count_operations(discovered_expr)
+                truth_ops = self._count_operations(truth_expr)
+
+                common_ops = sum(min(discovered_ops.get(op, 0), truth_ops.get(op, 0))
+                               for op in set(discovered_ops) | set(truth_ops))
+                total_ops = sum(discovered_ops.values()) + sum(truth_ops.values())
+
+                similarity = 2 * common_ops / total_ops if total_ops > 0 else 0
+                max_similarity = max(max_similarity, similarity)
+
+            return max_similarity
+
+        except (sp.SympifyError, TypeError):
+            return 0.0
     
     def _run_random_baseline(self, grammar, env_data, variables, config, run_id):
         """Run random action baseline."""
