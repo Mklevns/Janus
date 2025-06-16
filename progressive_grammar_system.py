@@ -67,10 +67,18 @@ class Expression:
                     result *= arg
                 return result
             elif self.operator == '/':
-                try:
-                    return args[0] / args[1]
-                except ZeroDivisionError:
+                denominator = args[1]
+                # SymPy returns zoo for division by zero rather than raising an
+                # error. Explicitly check for zero so that such cases yield
+                # ``nan`` instead of ``zoo`` in the resulting expression.
+                if (
+                    (isinstance(denominator, (int, float, sp.Integer, sp.Float))
+                     and denominator == 0)
+                    or (isinstance(denominator, sp.Expr)
+                        and denominator.is_zero is True)
+                ):
                     return sp.nan
+                return args[0] / denominator
             elif self.operator == '**':
                 return args[0] ** args[1]
         elif self.operator == 'diff':
