@@ -352,8 +352,10 @@ class ExperimentRunner:
             for idx, name in enumerate(physics_env.state_vars)
         ]
         
-        # Create algorithm
-        algorithm = self.algo_registry[config.algorithm](env_data, variables, config)
+        # Create algorithm if implemented in registry
+        algorithm = None
+        if config.algorithm in self.algo_registry:
+            algorithm = self.algo_registry[config.algorithm](env_data, variables, config)
         
         return {
             'physics_env': physics_env,
@@ -384,6 +386,8 @@ class ExperimentRunner:
             result = self._run_janus_experiment(setup, config, result)
         elif config.algorithm == 'genetic':
             result = self._run_genetic_experiment(setup, config, result)
+        elif config.algorithm == 'random':
+            result = self._run_random_experiment(setup, config, result)
         # Add more algorithm runners
         
         # Calculate final metrics
@@ -395,45 +399,85 @@ class ExperimentRunner:
         
         return result
     
-    def _run_janus_experiment(self, 
+    def _run_janus_experiment(self,
                             setup: Dict,
                             config: ExperimentConfig,
                             result: ExperimentResult) -> ExperimentResult:
-        """Run Janus algorithm."""
-        trainer = setup['algorithm']
-        
-        # Track learning curve
-        sample_efficiency_curve = []
+        """Run Janus algorithm with variable discovery and PPO training."""
+        start_time = time.time()
+
+        env_data = setup['env_data']
+
+        # Discover variables from data
+        grammar = ProgressiveGrammar()
+        discovered_vars = grammar.discover_variables(env_data[:, :-1])
+
+        # RL environment and policy
+        discovery_env = SymbolicDiscoveryEnv(
+            grammar=grammar,
+            target_data=env_data,
+            variables=discovered_vars,
+            **config.algo_params.get('env_params', {})
+        )
+
+        policy = HypothesisNet(
+            observation_dim=discovery_env.observation_space.shape[0],
+            action_dim=discovery_env.action_space.n,
+            grammar=grammar,
+            **config.algo_params.get('policy_params', {})
+        )
+
+        trainer = PPOTrainer(policy, discovery_env)
+        curriculum = CurriculumManager(discovery_env)
+
+        # Training loop
         best_mse = float('inf')
-        best_expression = None
-        
-        # Training loop with periodic evaluation
-        timesteps_per_eval = 1000
-        total_timesteps = config.max_experiments * 50  # Approximate
-        
-        for timestep in range(0, total_timesteps, timesteps_per_eval):
-            # Train
+        sample_efficiency_curve: List[Tuple[int, float]] = []
+        total_timesteps = config.max_experiments * 25
+
+        for timestep in range(0, total_timesteps, 1000):
+            current_env = curriculum.get_current_env()
+            trainer.env = current_env
+
             trainer.train(
-                total_timesteps=timesteps_per_eval,
-                rollout_length=512,
+                total_timesteps=1000,
+                rollout_length=256,
                 n_epochs=3,
-                log_interval=100
+                batch_size=64,
+                log_interval=10 if timestep % 10000 == 0 else 100,
             )
-            
-            # Evaluate best discovered expression
+
             if trainer.episode_mse:
-                current_mse = np.mean(trainer.episode_mse)
+                recent = list(trainer.episode_mse)
+                current_mse = np.mean(recent[-10:]) if len(recent) >= 1 else np.nan
+                sample_efficiency_curve.append((timestep, current_mse))
+
                 if current_mse < best_mse:
                     best_mse = current_mse
-                    # Get best expression from trainer
-                    # (would need to add method to extract this)
-                
-                sample_efficiency_curve.append((timestep, current_mse))
-        
+
+                success = current_mse < 0.01
+                curriculum.update_curriculum(success)
+
+            if best_mse < 1e-6:
+                break
+
+        # Conservation laws search
+        detector = ConservationDetector(grammar)
+        conserved = detector.find_conserved_quantities(
+            env_data,
+            discovered_vars,
+            max_complexity=config.algo_params.get('max_complexity', 10),
+        )
+
+        if conserved:
+            result.discovered_law = str(conserved[0].expression.symbolic)
+            result.law_complexity = conserved[0].expression.complexity
+
         result.predictive_mse = best_mse
         result.sample_efficiency_curve = sample_efficiency_curve
-        result.n_experiments_to_convergence = len(sample_efficiency_curve) * 10
-        
+        result.n_experiments_to_convergence = len(sample_efficiency_curve) * 50
+        result.wall_time_seconds = time.time() - start_time
+
         return result
     
     def _run_genetic_experiment(self, 
@@ -468,7 +512,51 @@ class ExperimentRunner:
                 predictions.append(0)
         
         result.predictive_mse = np.mean((np.array(predictions) - y)**2)
-        
+
+        return result
+
+    def _run_random_experiment(self,
+                               setup: Dict,
+                               config: ExperimentConfig,
+                               result: ExperimentResult) -> ExperimentResult:
+        """Run a simple random-action baseline."""
+        start_time = time.time()
+
+        env_data = setup['env_data']
+        grammar = ProgressiveGrammar()
+        variables = grammar.discover_variables(env_data[:, :-1])
+
+        discovery_env = SymbolicDiscoveryEnv(
+            grammar=grammar,
+            target_data=env_data,
+            variables=variables,
+            **config.algo_params.get('env_params', {})
+        )
+
+        best_expression = None
+        best_mse = float('inf')
+
+        for _ in range(100):
+            obs, _ = discovery_env.reset()
+            done = False
+            while not done:
+                mask = discovery_env.get_action_mask()
+                valid = np.where(mask)[0]
+                if len(valid) == 0:
+                    break
+                action = np.random.choice(valid)
+                obs, reward, terminated, truncated, _ = discovery_env.step(action)
+                done = terminated or truncated
+
+            if discovery_env._evaluation_cache.get('mse', float('inf')) < best_mse:
+                best_mse = discovery_env._evaluation_cache['mse']
+                best_expression = discovery_env._evaluation_cache.get('expression')
+
+        result.discovered_law = best_expression
+        result.predictive_mse = best_mse
+        result.n_experiments_to_convergence = 100 * 50
+        result.wall_time_seconds = time.time() - start_time
+
         return result
     
     def _calculate_symbolic_accuracy(self, 
