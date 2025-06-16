@@ -382,7 +382,47 @@ class SymbolicRegressor:
     def _mutate(self,
                expression: 'Expression',
                variables: List['Variable']) -> 'Expression':
-        """Mutate expression."""
-        # Simplified mutation - return slightly modified expression
-        # In practice, would modify subtrees
-        return expression
+        """Mutate an expression by modifying a random node."""
+        expr_copy = pickle.loads(pickle.dumps(expression))
+        nodes = self._get_all_subexpressions(expr_copy)
+
+        if not nodes:
+            return expr_copy
+
+        # Select a random node to mutate
+        node_to_mutate = np.random.choice(nodes)
+
+        # Apply a random mutation
+        mutation_type = np.random.choice(['operator', 'operand'])
+
+        if mutation_type == 'operator' and node_to_mutate.operator not in ['var', 'const']:
+            all_ops = list(self.grammar.primitives['binary_ops'] | self.grammar.primitives['unary_ops'])
+            # Ensure arity matches
+            current_arity = len(node_to_mutate.operands)
+            possible_new_ops = [
+                op
+                for op in all_ops
+                if (
+                    op in self.grammar.primitives['binary_ops'] and current_arity == 2
+                )
+                or (
+                    op in self.grammar.primitives['unary_ops'] and current_arity == 1
+                )
+            ]
+            if possible_new_ops:
+                node_to_mutate.operator = np.random.choice(possible_new_ops)
+
+        elif mutation_type == 'operand' and node_to_mutate.operands:
+            op_idx = np.random.randint(0, len(node_to_mutate.operands))
+            # Replace an operand with a new random terminal (variable or constant)
+            if np.random.random() < 0.5:
+                node_to_mutate.operands[op_idx] = np.random.choice(variables)
+            else:
+                node_to_mutate.operands[op_idx] = self.grammar.create_expression(
+                    'const', [np.random.randn()]
+                )
+
+        # Recalculate properties
+        expr_copy.__post_init__()
+
+        return expr_copy
