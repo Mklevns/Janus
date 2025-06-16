@@ -732,4 +732,4 @@ if __name__ == "__main__":
     print(f"\nDiscovered law: {result.discovered_law}")
     print(f"Symbolic accuracy: {result.symbolic_accuracy:.3f}")
     print(f"Predictive MSE: {result.predictive_mse:.3e}")
-    print(f"Wall time: {result.wall_time_seconds:.1f}s")
+    print(f"Wall time: {result.wall_time_seconds:.1f}s") 
