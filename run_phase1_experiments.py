@@ -208,7 +208,9 @@ class Phase1Validator:
         # Variable discovery
         logger.info("Discovering variables...")
         grammar = ProgressiveGrammar()
-        discovered_vars = grammar.discover_variables(env_data[:, :-1])  # Exclude energy column
+        # Use only the base state variables for discovery, not derived quantities
+        num_state_vars = len(physics_env.state_vars)
+        discovered_vars = grammar.discover_variables(env_data[:, :num_state_vars])
         
         logger.info(f"Discovered {len(discovered_vars)} variables:")
         for var in discovered_vars:
