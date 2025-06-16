@@ -67,10 +67,11 @@ class Expression:
                     result *= arg
                 return result
             elif self.operator == '/':
-                try:
-                    return args[0] / args[1]
-                except ZeroDivisionError:
+                # Check if the divisor is numerically zero before creating the expression
+                if hasattr(args[1], 'is_zero') and args[1].is_zero:
                     return sp.nan
+                else:
+                    return args[0] / args[1]
             elif self.operator == '**':
                 return args[0] ** args[1]
         elif self.operator == 'diff':
