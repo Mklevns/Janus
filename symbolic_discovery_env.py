@@ -120,10 +120,10 @@ class TreeState:
                 tensor[i, 0] = 1.0
             elif node.node_type == NodeType.OPERATOR:
                 tensor[i, 1] = 1.0
-                all_ops = list(
-                    grammar.primitives.get('binary_ops', set()) |
-                    grammar.primitives.get('unary_ops', set()) |
-                    grammar.primitives.get('calculus_ops', set())
+                all_ops = (
+                    sorted(grammar.primitives.get('binary_ops', set())) +
+                    sorted(grammar.primitives.get('unary_ops', set())) +
+                    sorted(grammar.primitives.get('calculus_ops', set()))
                 )
                 if node.value in all_ops:
                     idx = all_ops.index(node.value)
@@ -145,7 +145,8 @@ class TreeState:
 def _build_action_space(grammar, variables):
     actions: List[Tuple[str, Any]] = []
     for op_type in ['binary_ops', 'unary_ops', 'calculus_ops']:
-        actions.extend(('operator', op) for op in grammar.primitives.get(op_type, []))
+        ops = sorted(grammar.primitives.get(op_type, []))
+        actions.extend(('operator', op) for op in ops)
     actions.extend(('variable', var) for var in variables)
     consts = [
         ('constant', 0.0),
@@ -155,7 +156,7 @@ def _build_action_space(grammar, variables):
         ('constant', 'random_large'),
     ]
     actions.extend(consts)
-    actions.extend(('function', fn) for fn in grammar.learned_functions)
+    actions.extend(('function', fn) for fn in sorted(grammar.learned_functions))
     return actions
 
 class SymbolicDiscoveryEnv(gym.Env):
