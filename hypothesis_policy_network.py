@@ -314,7 +314,7 @@ class HypothesisNet(nn.Module):
         observation: Flattened tree state (batch_size, obs_dim)
         action_mask: Valid actions (batch_size, action_dim)
 
-        Returns dict with 'policy_logits', 'value', 'action_probs'
+        Returns dict with 'policy_logits', 'value', 'action_logits'
         """
         if self.debug:
             # DEBUG: print out dims so we know what's actually happening
@@ -349,16 +349,15 @@ class HypothesisNet(nn.Module):
         else:
             masked_logits = policy_logits
         
-        # Get action probabilities
-        action_probs = F.softmax(masked_logits, dim=-1)
+        # Clean up any stray NaNs just in case
+        action_logits = masked_logits.nan_to_num(nan=-1e9, posinf=1e9, neginf=-1e9)
         
         # Get value estimate
         value = self.value_net(tree_repr)
         
         return {
             'policy_logits': policy_logits,
-            'masked_logits': masked_logits,
-            'action_probs': action_probs,
+            'action_logits': action_logits,       # use these for Categorical
             'value': value,
             'tree_representation': tree_repr
         }
@@ -373,14 +372,16 @@ class HypothesisNet(nn.Module):
         Returns: (action, log_prob, value)
         """
         outputs = self.forward(observation, action_mask)
-        
+
+        # Build distribution directly from logits (no need to softmax)
+        dist = Categorical(logits=outputs['action_logits'])
+
         if deterministic:
-            action = torch.argmax(outputs['action_probs'], dim=-1)
+            action = torch.argmax(outputs['action_logits'], dim=-1)
         else:
-            dist = Categorical(outputs['action_probs'])
             action = dist.sample()
-        
-        log_prob = torch.log(outputs['action_probs'].gather(1, action.unsqueeze(1)))
+
+        log_prob = dist.log_prob(action)
         
         return action.item(), log_prob, outputs['value']
 
@@ -494,9 +495,9 @@ class PPOTrainer:
         
         # Get current policy outputs
         outputs = self.policy(obs, action_masks)
-        
+
         # Get log probs for taken actions
-        dist = Categorical(outputs['action_probs'])
+        dist = Categorical(logits=outputs['action_logits'])
         log_probs = dist.log_prob(actions)
         
         # Policy loss (PPO objective)
