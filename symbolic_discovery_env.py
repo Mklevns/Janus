@@ -168,7 +168,8 @@ class SymbolicDiscoveryEnv(gym.Env):
         variables: List[Any],
         max_depth: int = 10,
         max_complexity: int = 30,
-        reward_config: Optional[Dict[str, Any]] = None
+        reward_config: Optional[Dict[str, Any]] = None,
+        max_nodes: int = 50
     ):
         super().__init__()
         self.grammar = grammar
@@ -176,6 +177,7 @@ class SymbolicDiscoveryEnv(gym.Env):
         self.variables = variables
         self.max_depth = max_depth
         self.max_complexity = max_complexity
+        self.max_nodes = max_nodes
         default_reward_config = {
             'completion_bonus':    0.1,
             'validity_bonus':      0.05,
@@ -194,7 +196,7 @@ class SymbolicDiscoveryEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.max_depth * 128,),
+            shape=(self.max_nodes * 128,),
             dtype=np.float32
         )
     def reset(self, seed: Optional[int] = None, options=None) -> Tuple[np.ndarray, Dict]:
@@ -286,7 +288,7 @@ class SymbolicDiscoveryEnv(gym.Env):
                                        'complexity': expr.complexity, 'reward': reward})
         return float(reward)
     def _get_observation(self) -> np.ndarray:
-        tensor = self.current_state.to_tensor_representation(self.grammar, max_nodes=self.max_depth)
+        tensor = self.current_state.to_tensor_representation(self.grammar, max_nodes=self.max_nodes)
         return tensor.flatten().numpy()
     def _get_info(self) -> Dict[str, Any]:
         info = {'steps': self.steps_taken, 'nodes': self.current_state.count_nodes(),
@@ -340,7 +342,7 @@ if __name__ == "__main__":
     var_x = Variable("x", 0, {"smoothness":0.9})
     variables = [var_x]
     n = 1000; x = np.random.randn(n); y = 2*x + 1; data = np.column_stack([x, y])
-    env = SymbolicDiscoveryEnv(grammar, data, variables)
+    env = SymbolicDiscoveryEnv(grammar, data, variables, max_nodes=50)
     obs, info = env.reset()
     for _ in range(5):
         mask = env.get_action_mask()
