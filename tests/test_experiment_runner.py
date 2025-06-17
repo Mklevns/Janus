@@ -1,5 +1,6 @@
 import pytest
 import numpy as np # Still needed for ExperimentConfig if it uses it
+import re
 
 # Global mocks and sys.path manipulations are now in conftest.py.
 
@@ -9,6 +10,13 @@ from unittest.mock import patch, MagicMock
 from experiment_runner import ExperimentRunner, ExperimentConfig, ExperimentResult
 from progressive_grammar_system import Variable # Added for type hinting or simple var creation
 from physics_discovery_extensions import SymbolicRegressor # For mocking
+
+# from progressive_grammar_system import Variable # Not strictly needed for this test's mocking style
+
+def extract_variables(expr_str: str) -> set:
+    if expr_str is None:
+        return set()
+    return set(re.findall(r'\b(x\d+)\b', expr_str))
 
 
 class TestExperimentRunner:
@@ -219,6 +227,61 @@ class TestExperimentRunner:
         self.assertIn('target_variable_index', kwargs, "target_variable_index not in SDE kwargs")
         self.assertEqual(kwargs['target_variable_index'], target_col_idx,
                          "SymbolicDiscoveryEnv instantiated with incorrect target_variable_index.")
+
+    def test_variable_remapping(self):
+        runner = ExperimentRunner(use_wandb=False)
+        mock_regressor_instance = MagicMock(spec=SymbolicRegressor)
+
+        mock_fit_expression = MagicMock()
+        mock_fit_expression.symbolic = "x0 + x1" # Default mock symbolic output
+        mock_fit_expression.complexity = 3
+        mock_regressor_instance.fit.return_value = mock_fit_expression
+
+        data = np.random.randn(10, 3) # Original data: x0, x1, x2
+
+        # Test case 1: target_idx = 0 (target="x0") -> X uses "x1","x2" (internally "x0","x1" for regressor)
+        mock_fit_expression.symbolic = "x0 * x0 + 0.5*x1"
+        config1 = ExperimentConfig(name="test_remap_idx0", algorithm="genetic", target_variable_index=0)
+        setup1 = {'env_data': data, 'algorithm': mock_regressor_instance}
+        result1 = ExperimentResult(config=config1, run_id=0)
+        runner._run_genetic_experiment(setup1, config1, result1)
+        assert result1.discovered_law is not None
+        remapped_vars1 = extract_variables(result1.discovered_law)
+        expected_vars1 = {"x1", "x2"}
+        assert remapped_vars1 == expected_vars1, f"Test 1 Failed: Expected {expected_vars1}, got {remapped_vars1}"
+
+        # Test case 2: target_idx = 1 (target="x1") -> X uses "x0","x2" (internally "x0","x1")
+        mock_fit_expression.symbolic = "sin(x0) - x1"
+        config2 = ExperimentConfig(name="test_remap_idx1", algorithm="genetic", target_variable_index=1)
+        setup2 = {'env_data': data, 'algorithm': mock_regressor_instance}
+        result2 = ExperimentResult(config=config2, run_id=0)
+        runner._run_genetic_experiment(setup2, config2, result2)
+        assert result2.discovered_law is not None
+        remapped_vars2 = extract_variables(result2.discovered_law)
+        expected_vars2 = {"x0", "x2"}
+        assert remapped_vars2 == expected_vars2, f"Test 2 Failed: Expected {expected_vars2}, got {remapped_vars2}"
+
+        # Test case 3: target_idx = -1 (target="x2") -> X uses "x0","x1" (internally "x0","x1")
+        mock_fit_expression.symbolic = "x0 / (x1 + 1.0)"
+        config3 = ExperimentConfig(name="test_remap_idx_neg1", algorithm="genetic", target_variable_index=-1)
+        setup3 = {'env_data': data, 'algorithm': mock_regressor_instance}
+        result3 = ExperimentResult(config=config3, run_id=0)
+        runner._run_genetic_experiment(setup3, config3, result3)
+        assert result3.discovered_law is not None
+        remapped_vars3 = extract_variables(result3.discovered_law)
+        expected_vars3 = {"x0", "x1"}
+        assert remapped_vars3 == expected_vars3, f"Test 3 Failed: Expected {expected_vars3}, got {remapped_vars3}"
+
+        data_large = np.random.randn(10,5) # x0, x1, x2, x3, x4
+        mock_fit_expression.symbolic = "x0 + x1 + x2 + x3" # Regressor sees 4 features
+        config4 = ExperimentConfig(name="test_remap_idx_large", algorithm="genetic", target_variable_index=2) # target="x2"
+        setup4 = {'env_data': data_large, 'algorithm': mock_regressor_instance}
+        result4 = ExperimentResult(config=config4, run_id=0)
+        runner._run_genetic_experiment(setup4, config4, result4)
+        assert result4.discovered_law is not None
+        remapped_vars4 = extract_variables(result4.discovered_law)
+        expected_vars4 = {"x0", "x1", "x3", "x4"} # Original names of features used
+        assert remapped_vars4 == expected_vars4, f"Test 4 Failed: Expected {expected_vars4}, got {remapped_vars4}"
 
 
 if __name__ == "__main__":

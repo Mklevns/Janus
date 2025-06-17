@@ -23,6 +23,7 @@ import torch
 import wandb
 from tqdm import tqdm
 import hashlib
+import re
 
 from utils import calculate_symbolic_accuracy
 
@@ -458,45 +459,92 @@ class ExperimentRunner:
                               setup: Dict,
                               config: ExperimentConfig,
                               result: ExperimentResult) -> ExperimentResult:
-        """Run genetic programming baseline."""
+        """Run genetic programming baseline with correct variable handling."""
         regressor = setup['algorithm']
+        dataset = setup['env_data']
 
-        # Extract features and targets
-        target_idx_to_use = config.target_variable_index
-        if target_idx_to_use is None:
-            target_idx_to_use = -1 # Default to last column
+        n_vars_original = dataset.shape[1]
 
-        y = setup['env_data'][:, target_idx_to_use]
-        X = np.delete(setup['env_data'], target_idx_to_use, axis=1)
+        target_idx_for_slicing = config.target_variable_index
+        if target_idx_for_slicing is None or target_idx_for_slicing == -1:
+            target_idx_for_slicing = n_vars_original - 1
 
+        if target_idx_for_slicing == n_vars_original - 1:
+            X = dataset[:, :-1]
+            y = dataset[:, -1]
+        else:
+            X = np.delete(dataset, target_idx_for_slicing, axis=1)
+            y = dataset[:, target_idx_for_slicing]
 
-        # Adjust variable indices if target is not the last column
-        # This is a simplification; a robust solution would map original indices to new X indices
-        # For now, we assume variables are correctly aligned or genetic algorithm handles it
-        # based on the number of columns in X.
+        var_mapping_for_remapping_output = {}
+        original_var_names = [f"x{i}" for i in range(n_vars_original)]
 
-        # Fit
-        best_expr = regressor.fit(
+        actual_target_column_idx_in_original_dataset = config.target_variable_index
+        if actual_target_column_idx_in_original_dataset is None or actual_target_column_idx_in_original_dataset == -1:
+            actual_target_column_idx_in_original_dataset = n_vars_original - 1
+
+        current_X_col_idx = 0
+        for orig_idx in range(n_vars_original):
+            if orig_idx == actual_target_column_idx_in_original_dataset:
+                continue
+            var_mapping_for_remapping_output[f"x{current_X_col_idx}"] = original_var_names[orig_idx]
+            current_X_col_idx += 1
+
+        regressor_internal_X_variables = [
+            Variable(name=f"x{i}", index=i, properties={})
+            for i in range(X.shape[1])
+        ]
+
+        best_expr_object = regressor.fit(
             X, y,
-            setup['variables'],
+            regressor_internal_X_variables,
             max_complexity=config.algo_params.get('max_complexity', 15)
         )
 
-        result.discovered_law = str(best_expr.symbolic)
-        result.law_complexity = best_expr.complexity
-
-        # Calculate MSE
         predictions = []
-        for i in range(X.shape[0]):
-            subs = {var.symbolic: X[i, var.index] for var in setup['variables']}
-            try:
-                pred = float(best_expr.symbolic.subs(subs))
-                predictions.append(pred)
-            except:
-                predictions.append(0)
+        if best_expr_object and hasattr(best_expr_object, 'symbolic'):
+            for i in range(X.shape[0]):
+                subs = {var.symbolic: X[i, var.index] for var in regressor_internal_X_variables}
+                try:
+                    pred = float(best_expr_object.symbolic.subs(subs))
+                    predictions.append(pred)
+                except Exception:
+                    predictions.append(np.nan)
 
-        result.predictive_mse = np.mean((np.array(predictions) - y)**2)
+            if predictions:
+                valid_predictions_values = []
+                corresponding_y_values = []
+                for i, p_val in enumerate(predictions):
+                    if not np.isnan(p_val):
+                        valid_predictions_values.append(p_val)
+                        corresponding_y_values.append(y[i])
 
+                if valid_predictions_values:
+                    result.predictive_mse = np.mean((np.array(valid_predictions_values) - np.array(corresponding_y_values))**2)
+                else:
+                    result.predictive_mse = float('inf')
+            else:
+                result.predictive_mse = float('inf')
+
+            best_expr_str = str(best_expr_object.symbolic)
+            corrected_expr_str = self._remap_expression(best_expr_str, var_mapping_for_remapping_output)
+            result.discovered_law = corrected_expr_str
+            if hasattr(best_expr_object, 'complexity'):
+                result.law_complexity = best_expr_object.complexity
+            else:
+                result.law_complexity = 0
+        else:
+            result.discovered_law = None
+            result.predictive_mse = float('inf')
+            result.law_complexity = 0
+
+        return result
+
+    def _remap_expression(self, expr_str: str, var_mapping: Dict[str, str]) -> str:
+        """Remap variable names in expression string from regressor's internal names back to original dataset names."""
+        result = expr_str
+        for new_var, orig_var in sorted(var_mapping.items(), key=lambda x: len(x[0]), reverse=True):
+            result = re.sub(r'\b' + re.escape(new_var) + r'\b', orig_var, result)
         return result
 
     def run_experiment_suite(self,

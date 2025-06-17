@@ -1,9 +1,11 @@
 import pytest
 import pickle
 from unittest.mock import patch
+import numpy as np # Added import
 
 import physics_discovery_extensions # Add this import
 from physics_discovery_extensions import SymbolicRegressor
+from progressive_grammar_system import Expression, Variable, ProgressiveGrammar # Use real Expression
 
 class MockExpression:
     def __init__(self, operator, operands, complexity=0, symbolic=""):
@@ -114,6 +116,23 @@ class TestSymbolicRegressorCrossover:
         return reg
 
     @pytest.fixture
+    def simple_grammar_fixture_for_crossover(self): # Renamed to be more specific
+        g = ProgressiveGrammar()
+        return g
+
+    @pytest.fixture
+    def regressor_for_crossover_fixture(self, simple_grammar_fixture_for_crossover): # Renamed
+        # debug=True can be helpful for diagnosing test failures
+        return SymbolicRegressor(grammar=simple_grammar_fixture_for_crossover, max_depth=5, max_nodes=50, debug=False)
+
+    def _create_deep_expr_for_test(self, current_depth, max_allowed_depth, grammar, var_name="x0"): # Renamed method and added self
+        if current_depth >= max_allowed_depth:
+            return grammar.create_expression(var_name, [])
+        else:
+            # Using "sin" as an example unary operator assumed to be in ProgressiveGrammar
+            return grammar.create_expression("sin", [self._create_deep_expr_for_test(current_depth + 1, max_allowed_depth, grammar, var_name)])
+
+    @pytest.fixture # Keep sample_expressions if other tests use it with MockExpression
     def sample_expressions(self):
         # P1 = +(A, *(B,C))  Complexity: A=1, B=1, C=1, *=1+1+1=3, +=1+1+3=5
         # P2 = -(D, E)      Complexity: D=1, E=1, -=1+1+1=3
@@ -305,3 +324,90 @@ class TestSymbolicRegressorCrossover:
         assert parent1.operator == "+", "Modifying child1 affected parent1"
         child2.operator = "MODIFIED_TOO"
         assert parent2.operator == "-", "Modifying child2 affected parent2"
+
+# This can be part of an existing test class or a standalone test function.
+# For example, if there's a TestSymbolicRegressorCrossover class:
+# class TestSymbolicRegressorCrossover:
+#    def test_crossover_edge_cases(self, regressor_for_crossover_fixture, simple_grammar_fixture_for_crossover):
+# Or as a standalone function:
+def test_crossover_edge_cases(regressor_for_crossover_fixture, simple_grammar_fixture_for_crossover):
+    regr = regressor_for_crossover_fixture
+    grammar = simple_grammar_fixture_for_crossover
+    regr.n_vars = 2 # For _validate_tree if it evaluates expressions with x0, x1
+
+    # Test 1: Terminals (e.g., Variable instances)
+    expr1_term = grammar.create_expression("x0", [])
+    expr2_term = grammar.create_expression("x1", [])
+    child1_term, child2_term = regr._crossover(expr1_term, expr2_term)
+    assert str(child1_term.symbolic) == str(expr1_term.symbolic)
+    assert str(child2_term.symbolic) == str(expr2_term.symbolic)
+    assert child1_term is not expr1_term # Ensure copies are returned
+
+    # Test 2: One terminal, one complex expression
+    expr_sin_x1 = grammar.create_expression("sin", [grammar.create_expression("x1", [])])
+    child1_mix, child2_mix = regr._crossover(expr1_term, expr_sin_x1)
+    assert str(child1_mix.symbolic) == str(expr1_term.symbolic)
+    assert str(child2_mix.symbolic) == str(expr_sin_x1.symbolic)
+
+    # Test 3: Deeply nested vs simple expression
+    expr_cos_x0 = grammar.create_expression("cos", [grammar.create_expression("x0", [])])
+    expr_sin_cos_x0 = grammar.create_expression("sin", [expr_cos_x0]) # Depth 3
+    expr_x0_plus_x1 = grammar.create_expression("+", [
+        grammar.create_expression("x0", []), grammar.create_expression("x1", [])
+    ]) # Depth 2
+
+    successful_crossover_test3 = False
+    for _ in range(10): # Crossover has random element
+        child1_deep, child2_deep = regr._crossover(expr_sin_cos_x0, expr_x0_plus_x1)
+        parents_sym_t3 = {str(expr_sin_cos_x0.symbolic), str(expr_x0_plus_x1.symbolic)}
+        children_sym_t3 = {str(child1_deep.symbolic), str(child2_deep.symbolic)}
+        # Check if crossover actually changed something and children are valid
+        if children_sym_t3 != parents_sym_t3:
+             assert regr._validate_tree(child1_deep), f"Test3 Child1 invalid: {child1_deep.symbolic}"
+             assert regr._validate_tree(child2_deep), f"Test3 Child2 invalid: {child2_deep.symbolic}"
+             successful_crossover_test3 = True
+             break
+    assert successful_crossover_test3, "Test 3: Crossover did not occur or produced invalid children."
+
+    # Test 4: Max depth constraint enforcement
+    regr.max_depth = 3 # Temporarily lower max_depth for this test
+    # Create an expression of depth 3: sin(sin(x0))
+    # Need to call _create_deep_expr_for_test from an instance or make it static/module-level
+    # For now, assuming it's part of the test class or accessible to the test function.
+    # If it's part of TestSymbolicRegressorCrossover, it would be self._create_deep_expr_for_test
+    # If standalone, it would be _create_deep_expr_for_test directly.
+    # The provided snippet seems to make it a module-level function or part of the test class.
+    # Let's assume it's accessible.
+
+    # Recreating _create_deep_expr_for_test as a local helper for this standalone test function
+    def _create_deep_expr_local(current_depth, max_allowed_depth, grammar_to_use, var_name="x0"):
+        if current_depth >= max_allowed_depth:
+            return grammar_to_use.create_expression(var_name, [])
+        else:
+            return grammar_to_use.create_expression("sin", [_create_deep_expr_local(current_depth + 1, max_allowed_depth, grammar_to_use, var_name)])
+
+    deep_expr = _create_deep_expr_local(1, regr.max_depth, grammar)
+    # Create a shallow expression of depth 2: x0 + x1
+    shallow_expr = grammar.create_expression("+", [grammar.create_expression("x0",[]), grammar.create_expression("x1",[])])
+
+    for _ in range(20): # Multiple attempts due to randomness
+        c1_depth, c2_depth = regr._crossover(deep_expr, shallow_expr)
+        # If crossover happens, children's depth must be <= max_depth
+        if str(c1_depth.symbolic) != str(deep_expr.symbolic) or \
+           str(c2_depth.symbolic) != str(shallow_expr.symbolic):
+            assert regr._get_subtree_depth(c1_depth) <= regr.max_depth, f"Test4 Child1 exceeded max_depth: {str(c1_depth.symbolic)}"
+            assert regr._get_subtree_depth(c2_depth) <= regr.max_depth, f"Test4 Child2 exceeded max_depth: {str(c2_depth.symbolic)}"
+            assert regr._validate_tree(c1_depth) # Also ensure overall validity
+            assert regr._validate_tree(c2_depth)
+    # If crossover never happened, it implies _can_swap correctly prevented it due to depth,
+    # or no valid crossover points were found that would satisfy depth. This is implicitly a pass.
+    regr.max_depth = 5 # Reset to original fixture value if necessary, though fixture provides fresh regressor
+
+    # Test 5: Crossover involving constants
+    expr_const_1 = grammar.create_expression("const", [1.0])
+    expr_const_2 = grammar.create_expression("const", [2.0])
+    expr_p1_const = grammar.create_expression("+", [grammar.create_expression("x0",[]), expr_const_1])
+    expr_p2_const = grammar.create_expression("*", [grammar.create_expression("x1",[]), expr_const_2])
+    child1_const, child2_const = regr._crossover(expr_p1_const, expr_p2_const)
+    assert regr._validate_tree(child1_const), f"Test5 Child1 invalid: {str(child1_const.symbolic)}"
+    assert regr._validate_tree(child2_const), f"Test5 Child2 invalid: {str(child2_const.symbolic)}"
