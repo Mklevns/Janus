@@ -1,3 +1,4 @@
+# mklevns/janus/Mklevns-Janus-377dbdd2e196e36c324f61780a3b40b78803255b/physics_discovery_extensions.py
 """
 Physics Discovery Extensions for Progressive Grammar
 ===================================================
@@ -14,7 +15,7 @@ import networkx as nx
 from scipy.optimize import minimize
 from sklearn.metrics import mean_squared_error
 import pickle
-
+from progressive_grammar_system import Expression, Variable, ProgressiveGrammar
 
 @dataclass
 class PhysicalLaw:
@@ -444,9 +445,7 @@ class SymbolicRegressor:
             if np.random.random() < 0.5:
                 node_to_mutate.operands[op_idx] = np.random.choice(variables)
             else:
-                node_to_mutate.operands[op_idx] = self.grammar.create_expression(
-                    'const', [np.random.randn()]
-                )
+                node_to_mutate.operands[op_idx] = np.random.randn()
 
         # Recalculate properties
         expr_copy.__post_init__()

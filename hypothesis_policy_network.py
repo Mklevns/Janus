@@ -549,7 +549,7 @@ class PPOTrainer:
               log_interval: int = 10):
         """Main training loop."""
         
-        n_updates = total_timesteps // rollout_length
+        n_updates = max(1, total_timesteps // rollout_length)
         
         for update in range(n_updates):
             # Collect rollouts
