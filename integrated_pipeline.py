@@ -32,6 +32,7 @@ except ImportError:
 # Import all custom components
 from progressive_grammar_system import ProgressiveGrammar, Variable
 from symbolic_discovery_env import SymbolicDiscoveryEnv, CurriculumManager
+from enhanced_feedback import EnhancedSymbolicDiscoveryEnv, IntrinsicRewardCalculator, AdaptiveTrainingController
 from hypothesis_policy_network import HypothesisNet
 from physics_discovery_extensions import ConservationDetector, SymbolicRegressor
 from experiment_runner import ExperimentRunner, ExperimentConfig
@@ -287,7 +288,13 @@ class AdvancedJanusTrainer:
         }
         
         # Create base environment
-        if self.config.training_mode == "selfplay":
+        if self.config.training_mode == "advanced":
+            try:
+                env = EnhancedSymbolicDiscoveryEnv(**env_config)
+            except Exception:
+                print("⚠️  Enhanced environment not available, using standard environment")
+                env = SymbolicDiscoveryEnv(**env_config)
+        elif self.config.training_mode == "selfplay":
             try:
                 from multiagent_selfplay import AdversarialDiscoveryEnv
                 env = AdversarialDiscoveryEnv(**env_config)
@@ -307,9 +314,18 @@ class AdvancedJanusTrainer:
     def create_trainer(self):
         """Create the appropriate trainer based on mode."""
         
+        # Determine observation dimension
+        obs_dim = self.env.observation_space.shape[0]
+        if isinstance(self.env, EnhancedSymbolicDiscoveryEnv):
+            obs_dim = self.env.observation_encoder.enhance_observation(
+                np.zeros(obs_dim),
+                self.env.current_state,
+                self.grammar
+            ).shape[0]
+
         # Create policy network
         policy = HypothesisNet(
-            observation_dim=self.env.observation_space.shape[0],
+            observation_dim=obs_dim,
             action_dim=self.env.action_space.n,
             hidden_dim=256,
             encoder_type='transformer',
