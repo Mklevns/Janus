@@ -277,8 +277,11 @@ class SymbolicDiscoveryEnv(gym.Env):
         for i in range(len(self.target_data)):
             subs = {v.symbolic: self.target_data[i, v.index] for v in self.variables}
             try:
-                p = float(expr.symbolic.subs(subs))
-                preds.append(p); tars.append(self.target_data[i, self.target_variable_index])
+                pred = float(expr.symbolic.subs(subs))
+                if not np.isfinite(pred) or abs(pred) > 1e10:
+                    # Skip this prediction
+                    continue
+                preds.append(pred); tars.append(self.target_data[i, self.target_variable_index])
             except:
                 return self.reward_config.get('timeout_penalty', -1.0)
         if len(preds) < len(self.target_data) // 2:

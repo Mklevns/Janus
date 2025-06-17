@@ -89,11 +89,11 @@ class Phase1Validator:
                         'max_complexity': 10,
                         'reward_config': {
                         'completion_bonus': 0.1,
-                        'mse_weight': -1.0,
-                        'complexity_penalty': -0.01,
+                        'mse_weight': -0.1,
+                        'complexity_penalty': -0.001,
                         'validity_bonus': 0.05,
-                        'depth_penalty': -0.001,
-                        'timeout_penalty': -1.0
+                        'depth_penalty': -0.0001,
+                        'timeout_penalty': -0.5
                     }
                     },
                     'policy_params': {
