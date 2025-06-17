@@ -18,17 +18,40 @@ from hypothesis_policy_network import HypothesisNet, PPOTrainer
 from progressive_grammar_system import Expression
 
 
+class ConservationBiasedReward:
+    """Calculates a reward bonus based on conservation principles."""
+    def compute_conservation_bonus(self, expression: str, data: np.ndarray, variables: List[Any]) -> float:
+        """
+        Computes a bonus score if the expression adheres to known conservation laws.
+        Placeholder implementation.
+
+        Args:
+            expression: The symbolic expression string.
+            data: The training data.
+            variables: A list of variable objects/descriptors.
+
+        Returns:
+            A float representing the conservation bonus.
+        """
+        # TODO: Implement actual conservation law checking logic
+        # For now, returning a constant value
+        return 0.5
+
+
 class IntrinsicRewardCalculator:
     """Calculate intrinsic rewards based on novelty and discovery value."""
     
     def __init__(self, 
                  novelty_weight: float = 0.3,
                  diversity_weight: float = 0.2,
-                 complexity_growth_weight: float = 0.1):
+                 complexity_growth_weight: float = 0.1,
+                 conservation_weight: float = 0.4): # Add new weight
         
         self.novelty_weight = novelty_weight
         self.diversity_weight = diversity_weight
         self.complexity_growth_weight = complexity_growth_weight
+        self.conservation_weight = conservation_weight # Initialize new weight
+        self.conservation_calculator = ConservationBiasedReward() # Instantiate new module
         
         # History tracking
         self.expression_history: Deque[str] = deque(maxlen=1000)
@@ -42,7 +65,10 @@ class IntrinsicRewardCalculator:
                                  expression: str,
                                  complexity: int,
                                  extrinsic_reward: float,
-                                 embedding: Optional[np.ndarray] = None) -> float:
+                                 embedding: Optional[np.ndarray], # Keep this, but ensure it's Optional if it can be None
+                                 data: np.ndarray, # Add data
+                                 variables: List[Any] # Add variables
+                                 ) -> float:
         """Calculate combined intrinsic and extrinsic reward."""
         
         # 1. Novelty reward
@@ -53,12 +79,18 @@ class IntrinsicRewardCalculator:
         
         # 3. Complexity growth reward
         complexity_reward = self._calculate_complexity_growth_reward(complexity)
+
+        # 4. Conservation Bonus
+        conservation_bonus = self.conservation_calculator.compute_conservation_bonus(
+            expression, data, variables
+        )
         
         # Combine rewards
         intrinsic_reward = (
             self.novelty_weight * novelty_reward +
             self.diversity_weight * diversity_reward +
-            self.complexity_growth_weight * complexity_reward
+            self.complexity_growth_weight * complexity_reward +
+            self.conservation_weight * conservation_bonus # Add weighted conservation bonus
         )
         
         # Update history
@@ -646,7 +678,9 @@ class EnhancedSymbolicDiscoveryEnv(SymbolicDiscoveryEnv):
                 expression=expr,
                 complexity=complexity,
                 extrinsic_reward=reward,
-                embedding=embedding
+                embedding=embedding,
+                data=self.target_data, # Pass self.target_data
+                variables=self.variables # Pass self.variables
             )
             
             # Track for metrics
