@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 import time
 from pathlib import Path
+from collections import OrderedDict
 
 from hypothesis_policy_network import HypothesisNet, TreeEncoder, TransformerEncoder
 from symbolic_discovery_env import SymbolicDiscoveryEnv
@@ -92,7 +93,8 @@ class AsyncExpressionEvaluator:
     
     def __init__(self, grammar: ProgressiveGrammar):
         self.grammar = grammar
-        self.cache = {}
+        self.cache = OrderedDict()
+        self.max_cache_size = 4096  # Max number of expressions to cache
     
     def evaluate_batch(self, 
                       expressions: List[str],
@@ -104,9 +106,14 @@ class AsyncExpressionEvaluator:
         
         for expr_str in expressions:
             if expr_str in self.cache:
+                self.cache.move_to_end(expr_str)  # Mark as recently used
                 results.append(self.cache[expr_str])
                 continue
             
+            # If cache is full and expr_str is new, remove the oldest item
+            if len(self.cache) >= self.max_cache_size:
+                self.cache.popitem(last=False)
+
             try:
                 # Parse expression
                 expr = self.grammar.create_expression('var', [expr_str])

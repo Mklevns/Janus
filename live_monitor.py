@@ -46,6 +46,8 @@ class JanusLiveMonitor:
         self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
         self.fig.suptitle('Janus Physics Discovery - Live Monitor', fontsize=16)
         
+    # This method is designed to parse log lines. If used with actual file reading,
+    # ensure the file is opened and closed properly, preferably using a context manager.
     def parse_log_line(self, line: str) -> Dict[str, Any]:
         """Parse a log line for metrics."""
         
@@ -88,6 +90,8 @@ class JanusLiveMonitor:
         except:
             return {}
     
+    # TODO: If reading live data from log files, ensure to use
+    # 'with open(logfile, 'r') as f:' to manage file resources correctly.
     def update_data(self):
         """Update data from logs and checkpoints."""
         
@@ -262,7 +266,10 @@ class JanusLiveMonitor:
             cache_frame_data=False
         )
         
-        plt.show()
+        try:
+            plt.show()
+        finally:
+            plt.close(self.fig)  # Ensure figure is closed
 
 
 class DiscoveryAnalyzer:
