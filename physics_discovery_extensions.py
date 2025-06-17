@@ -440,12 +440,16 @@ class SymbolicRegressor:
                 node_to_mutate.operator = np.random.choice(possible_new_ops)
 
         elif mutation_type == 'operand' and node_to_mutate.operands:
-            op_idx = np.random.randint(0, len(node_to_mutate.operands))
-            # Replace an operand with a new random terminal (variable or constant)
-            if np.random.random() < 0.5:
-                node_to_mutate.operands[op_idx] = np.random.choice(variables)
+            if node_to_mutate.operator == 'const':
+                # If it's a const node, only replace its value with another number.
+                node_to_mutate.operands[0] = np.random.randn()
             else:
-                node_to_mutate.operands[op_idx] = np.random.randn()
+                op_idx = np.random.randint(0, len(node_to_mutate.operands))
+                # Replace an operand with a new random terminal (variable or constant)
+                if np.random.random() < 0.5:
+                    node_to_mutate.operands[op_idx] = np.random.choice(variables)
+                else:
+                    node_to_mutate.operands[op_idx] = np.random.randn()
 
         # Recalculate properties
         expr_copy.__post_init__()
