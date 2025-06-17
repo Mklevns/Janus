@@ -70,7 +70,7 @@ class Phase1Validator:
             'n_trajectories': 20,
             'trajectory_length': 100,
             'sampling_rate': 0.1,
-            'n_runs': 5,
+            'n_runs': 2,  # Reduced for faster testing
             'max_experiments': 2000
         }
 

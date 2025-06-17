@@ -267,7 +267,7 @@ class ProgressiveGrammar:
         }
 
         # Discovered components
-        self.variables: Dict[str, Variable] = {}
+        self.variables: Dict[str, 'Variable'] = {}
         self.learned_functions: Dict[str, Expression] = {}
         self.proven_lemmas: Dict[str, Expression] = {}
 
@@ -282,7 +282,7 @@ class ProgressiveGrammar:
 
     def discover_variables(self,
                           observations: np.ndarray,
-                          time_stamps: Optional[np.ndarray] = None) -> List[Variable]:
+                          time_stamps: Optional[np.ndarray] = None) -> List['Variable']:
         """
         Discover state variables from noisy observations using ICA and
         information-theoretic measures.
