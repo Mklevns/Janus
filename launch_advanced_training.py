@@ -14,10 +14,23 @@ from pathlib import Path
 import subprocess
 import yaml
 import torch
-import ray
 import psutil
-import GPUtil
 from typing import Dict, Any
+
+# Optional imports with fallbacks
+try:
+    import ray
+    HAS_RAY = True
+except ImportError:
+    HAS_RAY = False
+    print("⚠️  Ray not installed. Distributed training will be unavailable.")
+
+try:
+    import GPUtil
+    HAS_GPUTIL = True
+except ImportError:
+    HAS_GPUTIL = False
+    print("⚠️  GPUtil not installed. GPU details will be limited.")
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -34,20 +47,31 @@ def check_system_requirements() -> Dict[str, Any]:
         'memory_gb': psutil.virtual_memory().total / (1024**3),
         'gpu_count': torch.cuda.device_count() if torch.cuda.is_available() else 0,
         'cuda_available': torch.cuda.is_available(),
-        'ray_installed': 'ray' in sys.modules,
+        'ray_installed': HAS_RAY,
     }
     
     # Check GPU details
     if requirements['gpu_count'] > 0:
-        gpus = GPUtil.getGPUs()
-        requirements['gpu_details'] = [
-            {
-                'name': gpu.name,
-                'memory_mb': gpu.memoryTotal,
-                'driver': gpu.driver
-            }
-            for gpu in gpus
-        ]
+        if HAS_GPUTIL:
+            gpus = GPUtil.getGPUs()
+            requirements['gpu_details'] = [
+                {
+                    'name': gpu.name,
+                    'memory_mb': gpu.memoryTotal,
+                    'driver': gpu.driver
+                }
+                for gpu in gpus
+            ]
+        else:
+            # Fallback to basic torch info
+            requirements['gpu_details'] = [
+                {
+                    'name': torch.cuda.get_device_name(i),
+                    'memory_mb': torch.cuda.get_device_properties(i).total_memory / (1024**2),
+                    'driver': 'N/A'
+                }
+                for i in range(requirements['gpu_count'])
+            ]
     
     print(f"  CPUs: {requirements['cpu_count']}")
     print(f"  Memory: {requirements['memory_gb']:.1f} GB")
@@ -112,9 +136,29 @@ def setup_environment(config: Dict[str, Any]):
     if config['training_mode'] in ['distributed', 'advanced'] and config.get('num_workers', 0) > 1:
         if not ray.is_initialized():
             ray_config = config.get('ray_config', {})
-            print(f"\nInitializing Ray with {ray_config.get('num_cpus', 8)} CPUs "
-                  f"and {ray_config.get('num_gpus', 0)} GPUs...")
-            ray.init(**ray_config)
+            
+            # Extract only valid ray.init() parameters
+            valid_ray_params = {
+                'num_cpus': ray_config.get('num_cpus', 8),
+                'num_gpus': ray_config.get('num_gpus', config.get('num_gpus', 0)),
+                'object_store_memory': ray_config.get('object_store_memory'),
+                'include_dashboard': ray_config.get('include_dashboard', False),
+                'dashboard_host': ray_config.get('dashboard_host', '127.0.0.1'),
+                '_temp_dir': ray_config.get('_temp_dir'),
+                'local_mode': ray_config.get('local_mode', False)
+            }
+            
+            # Remove None values
+            valid_ray_params = {k: v for k, v in valid_ray_params.items() if v is not None}
+            
+            print(f"\nInitializing Ray with {valid_ray_params.get('num_cpus', 8)} CPUs "
+                  f"and {valid_ray_params.get('num_gpus', 0)} GPUs...")
+            
+            try:
+                ray.init(**valid_ray_params)
+            except Exception as e:
+                print(f"⚠️  Ray initialization failed: {e}")
+                print("  Continuing without Ray (will use single-machine training)")
 
 
 def launch_training(config: Dict[str, Any], resume: bool = False):
@@ -183,7 +227,7 @@ def launch_training(config: Dict[str, Any], resume: bool = False):
         
     finally:
         # Cleanup
-        if ray.is_initialized():
+        if HAS_RAY and ray.is_initialized():
             ray.shutdown()
         print("\nCleanup completed")
 
@@ -208,6 +252,11 @@ def save_checkpoint(trainer, config: Dict[str, Any]):
 
 def run_distributed_sweep(config_path: str, n_trials: int = 20):
     """Run distributed hyperparameter sweep."""
+    
+    if not HAS_RAY:
+        print("❌ Ray is not installed. Cannot run distributed sweep.")
+        print("  Install with: pip install ray[tune]")
+        sys.exit(1)
     
     print(f"\nRunning distributed sweep with {n_trials} trials...")
     
