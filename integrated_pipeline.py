@@ -11,8 +11,11 @@ import torch
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 import yaml
-from dataclasses import dataclass, field
+# from dataclasses import dataclass, field # No longer needed for JanusConfig
 import time
+from pydantic import BaseModel, Field, model_validator # BaseModel still needed for other configs
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Dict, List, Optional, Any # Ensure Any is available
 
 # Handle optional imports
 try:
@@ -43,8 +46,43 @@ from experiment_runner import ExperimentRunner, ExperimentConfig
 # from emergent_monitor import EmergentBehaviorTracker
 
 
-@dataclass
-class JanusConfig:
+class CurriculumStageConfig(BaseModel):
+    name: str
+    max_depth: int
+    max_complexity: int
+    success_threshold: float
+
+
+class SyntheticDataParamsConfig(BaseModel):
+    n_samples: int
+    noise_level: float
+    time_range: List[int]
+
+
+class RayConfig(BaseModel):
+    num_cpus: Optional[int] = 8
+    num_gpus: Optional[int] = None
+    object_store_memory: Optional[int] = None
+    placement_group_strategy: Optional[str] = None
+    include_dashboard: Optional[bool] = False
+    dashboard_host: Optional[str] = "127.0.0.1"
+    temp_dir: Optional[str] = Field(None, alias="_temp_dir")
+    local_mode: Optional[bool] = False
+
+    class Config:
+        populate_by_name = True
+
+
+class RewardConfig(BaseModel):
+    completion_bonus: float = 0.1
+    mse_weight: float = -1.0
+    complexity_penalty: float = -0.01
+    depth_penalty: float = -0.001
+    novelty_bonus: float = 0.2
+    conservation_bonus: float = 0.5
+
+
+class JanusConfig(BaseSettings):
     """Master configuration for Janus training."""
     
     # Environment
@@ -83,7 +121,7 @@ class JanusConfig:
     emergence_analysis_dir: Optional[str] = None  # Added this field
     
     # Reward configuration
-    reward_config: Optional[Dict[str, float]] = None
+    reward_config: RewardConfig = Field(default_factory=RewardConfig)
     
     # Additional fields from YAML
     curriculum_stages: Optional[List[Dict]] = None
@@ -99,28 +137,19 @@ class JanusConfig:
     enable_dimensional_analysis: bool = False
     mine_abstractions_every: int = 5000
     abstraction_min_frequency: int = 3
-    
-    @classmethod
-    def from_yaml(cls, path: str) -> 'JanusConfig':
-        """Load configuration from YAML file."""
-        with open(path, 'r') as f:
-            config_dict = yaml.safe_load(f)
-        return cls(**config_dict)
-    
-    def __post_init__(self):
-        """Post-initialization processing."""
-        # Set default reward config if not provided
-        if self.reward_config is None:
-            self.reward_config = {
-                'completion_bonus': 0.1,
-                'mse_weight': -1.0,
-                'complexity_penalty': -0.01,
-                'depth_penalty': -0.001
-            }
-        
-        # Set emergence analysis dir if not provided
-        if self.emergence_analysis_dir is None:
+
+    @model_validator(mode='after')
+    def set_default_emergence_analysis_dir(self) -> 'JanusConfig':
+        if self.emergence_analysis_dir is None and self.results_dir is not None:
             self.emergence_analysis_dir = f"{self.results_dir}/emergence"
+        return self
+
+    # Configuration for pydantic-settings
+    model_config = SettingsConfigDict(
+        env_prefix='JANUS_',  # Will look for JANUS_DATA_DIR, JANUS_WANDB_ENTITY, etc.
+        extra='ignore',       # Ignore extra env vars not matching fields
+        # case_sensitive=False, # Default
+    )
 
 
 class AdvancedJanusTrainer:
