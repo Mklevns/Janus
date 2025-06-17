@@ -305,3 +305,23 @@ class TestSymbolicRegressorCrossover:
         assert parent1.operator == "+", "Modifying child1 affected parent1"
         child2.operator = "MODIFIED_TOO"
         assert parent2.operator == "-", "Modifying child2 affected parent2"
+
+
+def test_generate_candidates_grammar_guided():
+    grammar = physics_discovery_extensions.ProgressiveGrammar()
+    variables = [physics_discovery_extensions.Variable("x", 0, {}),
+                 physics_discovery_extensions.Variable("y", 1, {})]
+    detector = physics_discovery_extensions.ConservationDetector(grammar)
+
+    candidates = detector._generate_candidates(variables, max_complexity=3)
+    sym_strs = {str(c.symbolic) for c in candidates}
+
+    # Basic variables included
+    assert "x" in sym_strs and "y" in sym_strs
+
+    # Should include at least one unary and one binary combination
+    assert any("+" in s for s in sym_strs)
+    assert any(token in s for s in sym_strs for token in ["sin", "cos", "log", "exp", "sqrt"])
+
+    # At least one binary combination with complexity 3 should exist
+    assert any(c.complexity == 3 for c in candidates)

@@ -70,34 +70,62 @@ class ConservationDetector:
         
         return conserved_laws
     
-    def _generate_candidates(self, 
+    def _generate_candidates(self,
                            variables: List['Variable'],
                            max_complexity: int) -> List['Expression']:
-        """Generate candidate conservation expressions."""
-        candidates = []
-        
-        # Start with simple expressions
+        """Generate candidate conservation expressions using grammar guidance."""
+
+        expressions_by_complexity: Dict[int, List['Expression']] = {1: []}
+        unique: Dict[str, 'Expression'] = {}
+
+        # Include variables and constants as base expressions
+        base_expressions: List['Expression'] = []
         for var in variables:
-            candidates.append(var)
-        
-        # Build more complex expressions iteratively
+            expressions_by_complexity[1].append(var)
+            unique[str(var.symbolic)] = var
+            base_expressions.append(var)
+
+        for c_val in self.grammar.primitives.get('constants', {}).values():
+            const_expr = self.grammar.create_expression('const', [c_val])
+            if const_expr and str(const_expr.symbolic) not in unique:
+                expressions_by_complexity[1].append(const_expr)
+                unique[str(const_expr.symbolic)] = const_expr
+                base_expressions.append(const_expr)
+
+        all_candidates = list(base_expressions)
+
+        # Iteratively build more complex expressions
         for complexity in range(2, max_complexity + 1):
-            new_candidates = []
-            
+            level_candidates: List['Expression'] = []
+
+            # Unary operations
+            for op in self.grammar.primitives.get('unary_ops', []):
+                for sub_c in range(1, complexity):
+                    for expr in expressions_by_complexity.get(sub_c, []):
+                        if expr.complexity + 1 == complexity:
+                            new_expr = self.grammar.create_expression(op, [expr])
+                            if new_expr and str(new_expr.symbolic) not in unique:
+                                unique[str(new_expr.symbolic)] = new_expr
+                                level_candidates.append(new_expr)
+
             # Binary operations
-            for op in ['+', '-', '*', '/', '**']:
-                for expr1 in candidates:
-                    for expr2 in candidates:
-                        if expr1.complexity + expr2.complexity + 1 == complexity:
-                            new_expr = self.grammar.create_expression(
-                                op, [expr1, expr2]
-                            )
-                            if new_expr:
-                                new_candidates.append(new_expr)
-            
-            candidates.extend(new_candidates)
-        
-        return candidates
+            for op in self.grammar.primitives.get('binary_ops', []):
+                for c1 in range(1, complexity):
+                    c2 = complexity - 1 - c1
+                    if c2 < 1:
+                        continue
+                    for expr1 in expressions_by_complexity.get(c1, []):
+                        for expr2 in expressions_by_complexity.get(c2, []):
+                            new_expr = self.grammar.create_expression(op, [expr1, expr2])
+                            if new_expr and str(new_expr.symbolic) not in unique:
+                                unique[str(new_expr.symbolic)] = new_expr
+                                level_candidates.append(new_expr)
+
+            if level_candidates:
+                expressions_by_complexity[complexity] = level_candidates
+                all_candidates.extend(level_candidates)
+
+        return all_candidates
     
     def _test_conservation(self,
                          expression: 'Expression',
