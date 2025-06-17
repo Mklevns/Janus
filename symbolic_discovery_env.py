@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 import gymnasium as gym
+from emergent_monitor import NoveltyDetector
 from gymnasium import spaces
 
 
@@ -170,7 +171,8 @@ class SymbolicDiscoveryEnv(gym.Env):
         max_complexity: int = 30,
         reward_config: Optional[Dict[str, Any]] = None,
         max_nodes: int = 50,
-        target_variable_index: Optional[int] = None
+        target_variable_index: Optional[int] = None,
+        novelty_detector: Optional[NoveltyDetector] = None
     ):
         super().__init__()
         self.grammar = grammar
@@ -209,6 +211,7 @@ class SymbolicDiscoveryEnv(gym.Env):
             shape=(self.max_nodes * 128,),
             dtype=np.float32
         )
+        self.novelty_detector = novelty_detector
     def reset(self, seed: Optional[int] = None, options=None) -> Tuple[np.ndarray, Dict]:
         super().reset(seed=seed)
         if seed is not None:
@@ -295,8 +298,21 @@ class SymbolicDiscoveryEnv(gym.Env):
             self.reward_config.get('complexity_penalty', -0.01) * expr.complexity +
             self.reward_config.get('depth_penalty', -0.001) * self.max_depth
         )
-        self._evaluation_cache.update({'expression': str(expr.symbolic), 'mse': mse,
-                                       'complexity': expr.complexity, 'reward': reward})
+
+        novelty_score = 0.0
+        if self.novelty_detector:
+            novelty_score, _ = self.novelty_detector.compute_novelty(str(expr.symbolic))
+            novelty_bonus_factor = self.reward_config.get('novelty_bonus_factor', 0.2)
+            novelty_bonus = novelty_bonus_factor * novelty_score
+            reward += novelty_bonus
+
+        self._evaluation_cache.update({
+            'expression': str(expr.symbolic),
+            'mse': mse,
+            'complexity': expr.complexity,
+            'reward': reward,
+            'novelty_score': novelty_score
+        })
         return float(reward)
     def _get_observation(self) -> np.ndarray:
         tensor = self.current_state.to_tensor_representation(self.grammar, max_nodes=self.max_nodes)
