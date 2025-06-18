@@ -174,14 +174,14 @@ class MetaLearningPolicy(nn.Module):
         value = self.value_head(features)
         
         # Physics predictions
-        symmetries = torch.sigmoid(self.symmetry_detector(features))
-        conservations = torch.sigmoid(self.conservation_predictor(features))
+        symmetry_logits = self.symmetry_detector(features)
+        conservation_logits = self.conservation_predictor(features)
         
         return {
             'policy_logits': policy_logits,
             'value': value,
-            'symmetries': symmetries,
-            'conservations': conservations,
+            'symmetries_logits': symmetry_logits,
+            'conservations_logits': conservation_logits,
             'features': features
         }
     
@@ -570,8 +570,10 @@ class MAMLTrainer:
             if task.symmetries and "none" not in task.symmetries:
                 # Encourage learning of symmetries
                 symmetry_targets = self._create_symmetry_targets(task.symmetries)
-                physics_loss = F.binary_cross_entropy(
-                    outputs['symmetries'].mean(0),
+
+                # FIX: Use the numerically stable BCEWithLogitsLoss and the new logits output
+                physics_loss = F.binary_cross_entropy_with_logits(
+                    outputs['symmetries_logits'].mean(0),
                     symmetry_targets.to(self.config.device)
                 )
             
