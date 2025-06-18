@@ -563,3 +563,298 @@ class TestSymbolicDiscoveryEnv(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+import pytest
+from symbolic_discovery_env import TreeState # Already imported SymbolicDiscoveryEnv, ExpressionNode, NodeType
+from progressive_grammar_system import ProgressiveGrammar, Variable # Already imported ProgressiveGrammar, Variable, Expression
+
+# It's good practice to define a fixture for the environment setup
+# if it's used across multiple tests.
+@pytest.fixture
+def env_setup():
+    grammar = ProgressiveGrammar()
+    # Populate grammar primitives if necessary for the test expressions
+    # This ensures that operators like 'sqrt', '/', '-', '*' are recognized
+    grammar.primitives = {
+        'binary_ops': {'+', '-', '*', '/'},
+        'unary_ops': {'sqrt', 'neg', 'exp', 'log', 'sin', 'cos'}, # Added common ops
+        'calculus_ops': set(), # Added empty set for calculus_ops
+        'constants': {'1.0': 1.0, '0.0':0.0, '2.0':2.0} # Ensure some constants are there if grammar needs them explicitly
+    }
+    # Ensure grammar can handle symbolic variables correctly, e.g. by registering them
+    # or ensuring its create_expression can handle unknown symbols if necessary.
+    # The Variable class itself should provide the symbolic representation.
+
+    x_var = Variable("x", 0, properties={"description": "input variable x"}) # Ensure Variable can be created like this
+    variables = [x_var]
+
+    # Target data: y = 2x + 1, with some noise for variance
+    # Using a simpler, deterministic dataset for easier debugging of test logic
+    x_data = np.array([[1.0], [2.0], [3.0], [4.0], [5.0]])
+    y_data = 2 * x_data + 1
+    target_data = np.hstack([x_data, y_data])
+
+    env = SymbolicDiscoveryEnv(
+        grammar=grammar,
+        target_data=target_data,
+        variables=variables,
+        max_depth=5,
+        max_complexity=30, # Increased complexity for some test expressions
+        reward_config={
+            'completion_bonus': 0.1,
+            'mse_weight': 1.0,
+            'mse_scale_factor': 1.0,
+            'complexity_penalty': -0.01,
+            'depth_penalty': -0.001,
+            'timeout_penalty': -1.0
+        }
+    )
+    # Ensure target_variable_index is set correctly by the environment, or set it explicitly
+    # SymbolicDiscoveryEnv defaults to the last column if target_variable_index is None
+    # For target_data = np.hstack([x_data, y_data]), y_data is the last column.
+    # So env.target_variable_index should be 1.
+    assert env.target_variable_index == 1
+
+    return env, grammar, x_var
+
+def test_evaluate_expression_handles_invalid_predictions_and_exceptions(env_setup):
+    env, grammar, x_var = env_setup
+
+    # --- Test Case 1: Prediction is NaN ---
+    # Expression: sqrt(x)
+    env.current_state = TreeState(max_depth=env.max_depth)
+    root_node = ExpressionNode(NodeType.OPERATOR, 'sqrt', depth=0)
+    # The Variable object itself is used as the value for VARIABLE nodes
+    var_node = ExpressionNode(NodeType.VARIABLE, x_var, parent=root_node, depth=1)
+    root_node.children.append(var_node)
+    env.current_state.root = root_node
+
+    # Original target data's y-variance is needed for penalty calculation
+    # The penalty is calculated based on the variance of the *current* env.target_data's target column
+
+    # Data point that causes NaN (sqrt(-1))
+    problematic_x = -1.0
+    # y-value for problematic_x doesn't matter for error if it's a penalty, but good to have a "correct" one
+    problematic_y = 2 * problematic_x + 1
+
+    test_target_data_nan = np.array([
+        [1.0, 2 * 1.0 + 1],      # x=1, y=3. pred=sqrt(1)=1. error=(1-3)^2=4
+        [problematic_x, problematic_y], # x=-1, y=-1. pred=sqrt(-1)=NaN. error=penalty
+        [4.0, 2 * 4.0 + 1]       # x=4, y=9. pred=sqrt(4)=2. error=(2-9)^2=49
+    ])
+    env.target_data = test_target_data_nan # Switch env to this data
+
+    # Recalculate penalty based on the new test_target_data_nan's y-column
+    current_target_y_values_nan = env.target_data[:, env.target_variable_index]
+    target_variance_nan = np.var(current_target_y_values_nan)
+    penalty_on_fail_nan = target_variance_nan if target_variance_nan > 1e-9 else 1.0
+
+    reward_nan = env._evaluate_expression()
+    mse_nan = env._evaluation_cache['mse']
+
+    expected_error_0_nan = (np.sqrt(test_target_data_nan[0,0]) - test_target_data_nan[0,1])**2
+    expected_error_2_nan = (np.sqrt(test_target_data_nan[2,0]) - test_target_data_nan[2,1])**2
+    expected_mse_nan = np.mean([expected_error_0_nan, penalty_on_fail_nan, expected_error_2_nan])
+
+    assert np.isclose(mse_nan, expected_mse_nan), f"MSE for NaN case incorrect. Expected {expected_mse_nan}, got {mse_nan}"
+
+    # --- Test Case 2: Prediction is very large ---
+    # Expression: 1/x
+    env.current_state = TreeState(max_depth=env.max_depth)
+    op_node = ExpressionNode(NodeType.OPERATOR, '/', depth=0)
+    const_node_one = ExpressionNode(NodeType.CONSTANT, 1.0, parent=op_node, depth=1, position=0)
+    var_node_div = ExpressionNode(NodeType.VARIABLE, x_var, parent=op_node, depth=1, position=1)
+    op_node.children.extend([const_node_one, var_node_div])
+    env.current_state.root = op_node
+
+    very_small_x = 1e-15
+    test_target_data_large = np.array([
+        [1.0, 1.0/1.0],      # pred = 1, target = 1, error = 0
+        [very_small_x, 0.0], # pred will be 1/1e-15 = 1e15 (large). Target doesn't matter for penalty. error=penalty
+        [2.0, 1.0/2.0]       # pred = 0.5, target = 0.5, error = 0
+    ])
+    env.target_data = test_target_data_large
+
+    current_target_y_values_large = env.target_data[:, env.target_variable_index]
+    target_variance_large = np.var(current_target_y_values_large)
+    penalty_on_fail_large = target_variance_large if target_variance_large > 1e-9 else 1.0
+
+    reward_large = env._evaluate_expression()
+    mse_large = env._evaluation_cache['mse']
+
+    expected_error_large_0 = ( (1.0/test_target_data_large[0,0]) - test_target_data_large[0,1] )**2
+    expected_error_large_2 = ( (1.0/test_target_data_large[2,0]) - test_target_data_large[2,1] )**2
+    expected_mse_large = np.mean([expected_error_large_0, penalty_on_fail_large, expected_error_large_2])
+    assert np.isclose(mse_large, expected_mse_large), f"MSE for large number case incorrect. Expected {expected_mse_large}, got {mse_large}"
+
+
+    # --- Test Case 3: Exception during evaluation (e.g., division by zero from x-x) ---
+    # Expression: 1 / (x - x) . (x-x) will be zero.
+    env.current_state = TreeState(max_depth=env.max_depth)
+    op_node_exc_div = ExpressionNode(NodeType.OPERATOR, '/', depth=0) # Division
+    const_node_exc_one = ExpressionNode(NodeType.CONSTANT, 1.0, parent=op_node_exc_div, depth=1, position=0) # Numerator: 1.0
+
+    sub_op_node = ExpressionNode(NodeType.OPERATOR, '-', parent=op_node_exc_div, depth=1, position=1) # Denominator: (x-x)
+    var_node_exc_lhs = ExpressionNode(NodeType.VARIABLE, x_var, parent=sub_op_node, depth=2, position=0) # x (LHS of subtraction)
+    var_node_exc_rhs = ExpressionNode(NodeType.VARIABLE, x_var, parent=sub_op_node, depth=2, position=1) # x (RHS of subtraction)
+    sub_op_node.children.extend([var_node_exc_lhs, var_node_exc_rhs])
+    op_node_exc_div.children.extend([const_node_exc_one, sub_op_node])
+    env.current_state.root = op_node_exc_div
+
+    # For x-x, any x value will make the denominator zero.
+    test_target_data_exc = np.array([
+        [2.0, 0.0],      # pred = 1/(2-2) -> exception. error=penalty. Target doesn't matter.
+        [1.0, 0.0],      # pred = 1/(1-1) -> exception. error=penalty. Target doesn't matter.
+        [3.0, 0.0]       # pred = 1/(3-3) -> exception. error=penalty. Target doesn't matter.
+    ])
+    env.target_data = test_target_data_exc
+
+    current_target_y_values_exc = env.target_data[:, env.target_variable_index]
+    target_variance_exc = np.var(current_target_y_values_exc) # Will be 0 for [0,0,0]
+    penalty_on_fail_exc = target_variance_exc if target_variance_exc > 1e-9 else 1.0 # Should be 1.0
+
+    reward_exc = env._evaluate_expression()
+    mse_exc = env._evaluation_cache['mse']
+
+    # All points should result in penalty
+    expected_mse_exc = np.mean([penalty_on_fail_exc, penalty_on_fail_exc, penalty_on_fail_exc])
+    assert np.isclose(mse_exc, expected_mse_exc), f"MSE for exception case incorrect. Expected {expected_mse_exc}, got {mse_exc}"
+    assert np.isclose(penalty_on_fail_exc, 1.0), "Penalty for zero variance target in exception case should be 1.0"
+
+
+    # --- Test Case 4: Zero target variance and penalty is 1.0 ---
+    # Use target data where y is constant. Expression: sqrt(x)
+    constant_y_value = 5.0
+    target_data_zero_var = np.array([
+        [1.0, constant_y_value], # x=1, y=5. pred=sqrt(1)=1. error=(1-5)^2=16
+        [-1.0, constant_y_value],# x=-1, y=5. pred=sqrt(-1)=NaN. error=penalty (should be 1.0)
+        [4.0, constant_y_value]  # x=4, y=5. pred=sqrt(4)=2. error=(2-5)^2=9
+    ])
+    env.target_data = target_data_zero_var
+
+    # Rebuild sqrt(x) expression from Test Case 1
+    env.current_state = TreeState(max_depth=env.max_depth)
+    root_node_zv = ExpressionNode(NodeType.OPERATOR, 'sqrt', depth=0)
+    var_node_zv = ExpressionNode(NodeType.VARIABLE, x_var, parent=root_node_zv, depth=1)
+    root_node_zv.children.append(var_node_zv)
+    env.current_state.root = root_node_zv
+
+    current_target_y_values_zv = env.target_data[:, env.target_variable_index]
+    target_variance_zv = np.var(current_target_y_values_zv) # Should be 0 for [5,5,5]
+    penalty_on_fail_zv = target_variance_zv if target_variance_zv > 1e-9 else 1.0 # Should be 1.0
+
+    assert np.isclose(target_variance_zv, 0.0), "Target variance for constant y should be 0."
+    assert np.isclose(penalty_on_fail_zv, 1.0), "Penalty for zero variance case should be 1.0."
+
+    reward_zero_var = env._evaluate_expression()
+    mse_zero_var = env._evaluation_cache['mse']
+
+    expected_error_zv_0 = (np.sqrt(target_data_zero_var[0,0]) - target_data_zero_var[0,1])**2
+    expected_error_zv_2 = (np.sqrt(target_data_zero_var[2,0]) - target_data_zero_var[2,1])**2
+    expected_mse_zero_var = np.mean([expected_error_zv_0, penalty_on_fail_zv, expected_error_zv_2])
+
+    assert np.isclose(mse_zero_var, expected_mse_zero_var), f"MSE for zero variance case incorrect. Expected {expected_mse_zero_var}, got {mse_zero_var}"
+
+    # --- Test Case 5: All predictions are valid ---
+    # Expression: x * 2.0
+    env.current_state = TreeState(max_depth=env.max_depth)
+    op_node_valid = ExpressionNode(NodeType.OPERATOR, '*', depth=0)
+    var_node_valid_mult = ExpressionNode(NodeType.VARIABLE, x_var, parent=op_node_valid, depth=1, position=0)
+    const_node_valid_two = ExpressionNode(NodeType.CONSTANT, 2.0, parent=op_node_valid, depth=1, position=1)
+    op_node_valid.children.extend([var_node_valid_mult, const_node_valid_two])
+    env.current_state.root = op_node_valid
+
+    # Use a simple, all-valid target data
+    test_target_data_valid = np.array([
+        [1.0, 2.0], # pred = 1*2=2, target=2, error=0
+        [2.0, 4.0], # pred = 2*2=4, target=4, error=0
+        [3.0, 6.0]  # pred = 3*2=6, target=6, error=0
+    ])
+    env.target_data = test_target_data_valid
+
+    # Verify penalty calculation for this valid case (it won't be used if all valid, but good to check)
+    current_target_y_values_valid = env.target_data[:, env.target_variable_index]
+    target_variance_valid = np.var(current_target_y_values_valid) # Var of [2,4,6]
+    # penalty_on_fail_valid = target_variance_valid if target_variance_valid > 1e-9 else 1.0
+
+    reward_valid = env._evaluate_expression()
+    mse_valid = env._evaluation_cache['mse']
+    complexity_valid = env._evaluation_cache['complexity'] # Check complexity is reported
+
+    expected_mse_valid = np.mean([
+        (test_target_data_valid[0,0]*2.0 - test_target_data_valid[0,1])**2,
+        (test_target_data_valid[1,0]*2.0 - test_target_data_valid[1,1])**2,
+        (test_target_data_valid[2,0]*2.0 - test_target_data_valid[2,1])**2,
+    ])
+    assert np.isclose(mse_valid, expected_mse_valid), f"MSE for all valid case incorrect. Expected {expected_mse_valid}, got {mse_valid}"
+    assert isinstance(reward_valid, float), "Reward for valid case should be a float."
+    assert 'complexity' in env._evaluation_cache, "Complexity should be in evaluation cache."
+
+    # Check reward calculation components for the valid case
+    # norm = mse / (target_variance + 1e-10)
+    # reward = (
+    #     self.reward_config.get('completion_bonus', 0.1) +
+    #     self.reward_config.get('mse_weight', 1.0) * np.exp(-self.reward_config.get('mse_scale_factor', 1.0) * norm) +
+    #     self.reward_config.get('complexity_penalty', -0.01) * expr.complexity +
+    #     self.reward_config.get('depth_penalty', -0.001) * self.max_depth
+    # )
+
+    norm_valid = mse_valid / (target_variance_valid + 1e-10)
+    expected_reward_calc = (
+        env.reward_config.get('completion_bonus') +
+        env.reward_config.get('mse_weight') * np.exp(-env.reward_config.get('mse_scale_factor') * norm_valid) +
+        env.reward_config.get('complexity_penalty') * complexity_valid +
+        env.reward_config.get('depth_penalty') * env.max_depth
+    )
+    assert np.isclose(reward_valid, expected_reward_calc), f"Full reward calculation for valid case is incorrect. Expected {expected_reward_calc}, got {reward_valid}"
+
+    # --- Test Case 6: Expression complexity exceeds max_complexity ---
+    env.max_complexity = 2 # Set a very low max_complexity for testing this
+    # Use the x*2.0 expression (complexity should be 3: x, 2.0, *)
+    env.current_state.root = op_node_valid # Same as Test Case 5
+    env.target_data = test_target_data_valid # Use valid data, outcome shouldn't depend on MSE here
+
+    reward_exceed_complexity = env._evaluate_expression()
+    # Expected reward: complexity_penalty * expr.complexity
+    # The expression is x*2.0. Assume its complexity is 3.
+    # The grammar and to_expression must correctly calculate complexity.
+    # We need to ensure the expression object from to_expression has 'complexity'.
+    # The Expression class from progressive_grammar_system.py should provide this.
+
+    # Need to get the actual complexity value that ProgressiveGrammar would assign.
+    # For testing, let's assume a fixed complexity for "x*2.0" if ProgressiveGrammar is complex.
+    # However, ProgressiveGrammar's Expression class calculates it as 1 (op) + sum of child complexities.
+    # Variable is 1. A constant node like '2.0' becomes Expression('const', [2.0]), which has complexity 1 (for 'const') + 1 (for 2.0) = 2.
+    # So x*2.0 is 1 (for '*') + 1 (for x_var) + 2 (for Expression('const', [2.0])) = 4.
+    expected_complexity_for_mult = 4
+
+    expected_reward_exceed = env.reward_config.get('complexity_penalty', -0.01) * expected_complexity_for_mult
+    assert np.isclose(reward_exceed_complexity, expected_reward_exceed), \
+        f"Reward for exceeding max_complexity is incorrect. Expected {expected_reward_exceed}, got {reward_exceed_complexity}"
+
+    # Reset max_complexity for other tests if env is reused (pytest fixtures usually recreate)
+    env.max_complexity = 30
+
+
+    # --- Test Case 7: Incomplete expression (root is EMPTY) ---
+    env.current_state = TreeState(max_depth=env.max_depth) # Fresh empty state
+    assert env.current_state.root.node_type == NodeType.EMPTY
+
+    reward_incomplete = env._evaluate_expression()
+    expected_reward_incomplete = env.reward_config.get('timeout_penalty', -1.0)
+    assert np.isclose(reward_incomplete, expected_reward_incomplete), \
+        f"Reward for incomplete (empty root) expression is incorrect. Expected {expected_reward_incomplete}, got {reward_incomplete}"
+
+    # --- Test Case 8: Incomplete expression (operator with missing child) ---
+    env.current_state = TreeState(max_depth=env.max_depth)
+    root_incomplete_op = ExpressionNode(NodeType.OPERATOR, '+', depth=0)
+    var_child_incomplete = ExpressionNode(NodeType.VARIABLE, x_var, parent=root_incomplete_op, depth=1)
+    root_incomplete_op.children.append(var_child_incomplete) # Only one child for binary op '+'
+    env.current_state.root = root_incomplete_op
+
+    # to_expression should return None for this incomplete tree
+    assert env.current_state.root.to_expression(grammar) is None, "Incomplete op node should not produce an expression."
+
+    reward_incomplete_op_eval = env._evaluate_expression()
+    assert np.isclose(reward_incomplete_op_eval, expected_reward_incomplete), \
+        f"Reward for incomplete (operator missing child) expression is incorrect. Expected {expected_reward_incomplete}, got {reward_incomplete_op_eval}"
