@@ -1,5 +1,5 @@
 import pytest
-import pickle
+from copy import deepcopy
 from unittest.mock import patch
 
 import physics_discovery_extensions # Add this import
@@ -139,8 +139,8 @@ class TestSymbolicRegressorCrossover:
         parent1, parent2, p1_orig_repr, p2_orig_repr = sample_expressions
 
         # Make deep copies for checking originals are untouched
-        p1_before_crossover_copy = pickle.loads(pickle.dumps(parent1))
-        p2_before_crossover_copy = pickle.loads(pickle.dumps(parent2))
+        p1_before_crossover_copy = deepcopy(parent1)
+        p2_before_crossover_copy = deepcopy(parent2)
 
         # Ensure copies are identical before operation
         assert parent1 == p1_before_crossover_copy
@@ -267,8 +267,8 @@ class TestSymbolicRegressorCrossover:
         parent1, parent2, p1_orig_repr, p2_orig_repr = sample_expressions
 
         # Make deep copies for checking originals are untouched
-        p1_before_crossover_copy = pickle.loads(pickle.dumps(parent1))
-        p2_before_crossover_copy = pickle.loads(pickle.dumps(parent2))
+        p1_before_crossover_copy = deepcopy(parent1)
+        p2_before_crossover_copy = deepcopy(parent2)
 
         # Mock _get_all_subexpressions to return empty list, simulating no valid crossover points
         with patch.object(regressor, '_get_all_subexpressions', return_value=[]):
