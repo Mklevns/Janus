@@ -272,24 +272,35 @@ class SymbolicDiscoveryEnv(gym.Env):
         expr = self.current_state.root.to_expression(self.grammar)
         if not expr:
             return self.reward_config.get('timeout_penalty', -1.0)
+
         if expr.complexity > self.max_complexity:
             return self.reward_config.get('complexity_penalty', -0.01) * expr.complexity
-        preds, tars = [], []
+
+        errors = []
+        # Pre-calculate the variance of the target data to use as a penalty for invalid predictions.
+        # This makes the penalty scaled to the problem's difficulty.
+        target_variance = np.var(self.target_data[:, self.target_variable_index])
+        # If variance is zero (constant target), use a default penalty of 1.0.
+        penalty_on_fail = target_variance if target_variance > 1e-9 else 1.0
+
         for i in range(len(self.target_data)):
             subs = {v.symbolic: self.target_data[i, v.index] for v in self.variables}
+            target_val = self.target_data[i, self.target_variable_index]
+
             try:
                 pred = float(expr.symbolic.subs(subs))
-                if not np.isfinite(pred) or abs(pred) > 1e10:
-                    # Skip this prediction
-                    continue
-                preds.append(pred); tars.append(self.target_data[i, self.target_variable_index])
-            except:
-                return self.reward_config.get('timeout_penalty', -1.0)
-        if len(preds) < len(self.target_data) // 2:
-            return self.reward_config.get('timeout_penalty', -1.0)
-        preds, tars = np.array(preds), np.array(tars)
-        mse = np.mean((preds - tars)**2)
-        norm = mse / (np.var(tars) + 1e-10)
+                if not np.isfinite(pred) or abs(pred) > 1e12: # Check for NaN, inf, or huge numbers
+                    errors.append(penalty_on_fail) # Add high penalty
+                else:
+                    errors.append((pred - target_val)**2) # Add squared error
+            except Exception:
+                errors.append(penalty_on_fail) # Add high penalty on any evaluation error
+
+        # The final MSE is the mean of all errors, including penalties.
+        mse = np.mean(errors)
+
+        # The rest of the reward calculation remains the same.
+        norm = mse / (target_variance + 1e-10)
         reward = (
             self.reward_config.get('completion_bonus', 0.1) +
             self.reward_config.get('mse_weight', 1.0) * np.exp(-self.reward_config.get('mse_scale_factor', 1.0) * norm) +

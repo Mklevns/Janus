@@ -34,7 +34,7 @@ MOCK_MODULES = {
     'torch.nn': torch_nn_mock,
     'wandb': MagicMock(name="GlobalWandBMock"),
     'hypothesis_policy_network': MagicMock(name="GlobalHypothesisPolicyNetworkMock"),
-    'symbolic_discovery_env': MagicMock(name="GlobalSymbolicDiscoveryEnvMock"),
+    # 'symbolic_discovery_env': MagicMock(name="GlobalSymbolicDiscoveryEnvMock"), # Commented out to allow real module usage
     # sklearn is not mocked, attempting to install and use it.
 }
 
