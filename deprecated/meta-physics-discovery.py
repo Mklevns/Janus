@@ -1,4 +1,24 @@
 """
+DEPRECATED: This module has been replaced by maml_training_framework.py
+
+This file is kept for reference only. Please use:
+- maml_training_framework.py for MAML implementation
+- physics_task_distribution.py for task distribution
+
+Migration guide:
+- Replace: from meta_physics_discovery import PhysicsTask
+  With:    from physics_task_distribution import PhysicsTask
+
+- Replace: from meta_physics_discovery import MAMLPhysicsDiscovery
+  With:    from maml_training_framework import MAMLTrainer
+"""
+
+raise DeprecationWarning(
+    "meta-physics-discovery.py is deprecated. "
+    "Use maml_training_framework.py instead."
+)
+
+"""
 Meta-Learning Framework for Physics Discovery
 ============================================
 
