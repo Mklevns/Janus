@@ -500,6 +500,12 @@ class PPOTrainer:
         advantages = batch['advantages']
         returns = batch['returns']
         action_masks = batch['action_masks']
+
+        assert isinstance(action_masks, torch.Tensor), "action_masks should be a torch.Tensor"
+        assert action_masks.dtype == torch.bool, f"action_masks dtype should be torch.bool, got {action_masks.dtype}"
+        batch_size = obs.shape[0]
+        expected_shape = (batch_size, self.policy.action_dim)
+        assert action_masks.shape == expected_shape, f"action_masks shape should be {expected_shape}, got {action_masks.shape}"
         
         # Get current policy outputs
         outputs = self.policy(obs, action_masks)
