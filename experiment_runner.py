@@ -27,6 +27,7 @@ import abc
 import logging
 import importlib.metadata
 import sys # For sys.exit
+import os # Added
 
 from custom_exceptions import MissingDependencyError, PluginNotFoundError, InvalidConfigError, DataGenerationError
 from base_experiment import BaseExperiment
@@ -476,6 +477,9 @@ if __name__ == "__main__":
         name="main_test_harmonic_genetic", experiment_type='physics_discovery_example',
         janus_config=test_janus_config, algorithm_name='genetic', n_runs=1, seed=123
     )
+    os.environ['JANUS_PARALLEL_GENERATION'] = 'true'
+    os.environ['JANUS_BEAM_WIDTH'] = '1000'
+    os.environ['JANUS_CACHE_SIZE'] = '50000'
     main_strict_mode = os.getenv("JANUS_STRICT_MODE", "false").lower() == "true"
     runner_main = ExperimentRunner(use_wandb=False, base_dir="./experiments_main_test", strict_mode=main_strict_mode)
     if example_exp_config.experiment_type not in runner_main.experiment_plugins:

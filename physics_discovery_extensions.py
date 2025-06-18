@@ -18,6 +18,15 @@ from sklearn.metrics import mean_squared_error
 import pickle
 from copy import deepcopy
 from progressive_grammar_system import Expression, Variable, ProgressiveGrammar
+from optimized_candidate_generation import OptimizedCandidateGenerator
+import random
+import psutil
+import os
+import time
+import logging
+import cProfile
+import pstats
+from io import StringIO
 
 @dataclass
 class PhysicalLaw:
@@ -194,12 +203,14 @@ class ConservationDetector:
 class SymbolicRegressor:
     """Performs symbolic regression to fit data to mathematical expressions."""
     
-    def __init__(self, grammar: 'ProgressiveGrammar'):
+    def __init__(self, grammar: 'ProgressiveGrammar', **kwargs):
         self.grammar = grammar
-        self.population_size = 100
-        self.generations = 50
-        self.mutation_rate = 0.1
-        self.crossover_rate = 0.7
+        self._optimizer = OptimizedCandidateGenerator(self.grammar, enable_parallel=True)
+        self.population_size = kwargs.get('population_size', 100)
+        self.generations = kwargs.get('generations', 50)
+        self.max_complexity = kwargs.get('max_complexity', 10) # Added max_complexity
+        self.mutation_rate = 0.1 # This line was present, keeping it
+        self.crossover_rate = 0.7 # This line was present, keeping it
         
     def fit(self,
            X: np.ndarray,
