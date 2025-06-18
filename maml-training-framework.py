@@ -269,12 +269,11 @@ class TaskEnvironmentBuilder:
     
     def _create_task_grammar(self, task: PhysicsTask) -> ProgressiveGrammar:
         """Create grammar with operators appropriate for task"""
+        # Using load_defaults=True ensures a standardized grammar
+        # with all possible operators, guaranteeing a consistent
+        # action space across all environments.
         # Initialize an EMPTY grammar
-        grammar = ProgressiveGrammar(load_defaults=False)
-        
-        # Base operators for all physics
-        base_ops = ['+', '-', '*', '/']
-        grammar.add_operators(base_ops)
+        grammar = ProgressiveGrammar(load_defaults=True)
         
         # Domain-specific operators
         if task.domain == "mechanics":
