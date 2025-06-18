@@ -747,8 +747,12 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
         """Remaps an expression string from temporary variable names to original variable names."""
         result = expr_str
         # Sort variables by length of the key (e.g., 'x10' before 'x1') to prevent partial replacements.
+        # This sorting is still important for re.sub if patterns could overlap in complex ways,
+        # though word boundaries reduce the risk.
         sorted_vars = sorted(var_mapping.items(), key=lambda item: len(item[0]), reverse=True)
         for new_var, orig_var in sorted_vars:
+            # Use word boundaries to ensure only whole words are replaced.
+            # re.escape is used to handle cases where new_var might contain special regex characters.
             result = re.sub(r'' + re.escape(new_var) + r'', orig_var, result)
         return result
 

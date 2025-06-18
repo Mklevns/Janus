@@ -417,14 +417,48 @@ class PPOTrainer:
             # In a real meta-PPO, task_trajectories might change per update or be sampled with rollouts
             rollout_data = self.collect_rollouts(rollout_length, task_trajectories=None) # Pass None for now
 
-            for _ in range(n_epochs):
-                num_samples = len(rollout_data['observations'])
-                indices = np.random.permutation(num_samples)
-                for start_idx in range(0, num_samples, batch_size):
-                    batch_indices = indices[start_idx : start_idx + batch_size]
-                    batch = {k: v[batch_indices] for k, v in rollout_data.items()}
-                    # If RolloutBuffer stored task_trajs, extract batch['task_trajectories_batch'] here
-                    self.train_step(batch, task_trajectories_batch=None) # Pass None for now
+            num_samples_in_rollout = len(rollout_data['observations'])
+            if num_samples_in_rollout == 0:
+                if update % log_interval == 0:
+                    avg_reward = np.mean(list(self.episode_rewards)) if self.episode_rewards else float('nan')
+                    print(f"Update {update}/{n_updates}, Avg Reward: {avg_reward:.3f}. No samples in rollout. Skipping training for this update.")
+                return # Return from train method if no samples
+
+            data_indices = np.arange(num_samples_in_rollout)
+
+            for epoch_num in range(n_epochs):  # Loop for n_epochs, added epoch_num for logging
+                np.random.shuffle(data_indices)  # Shuffle indices at the beginning of each epoch
+
+                for start_idx in range(0, num_samples_in_rollout, batch_size):
+                    mini_batch_indices_np = data_indices[start_idx : start_idx + batch_size]
+
+                    if len(mini_batch_indices_np) == 0:
+                        continue
+
+                    mini_batch_indices_list = mini_batch_indices_np.tolist()
+
+                    batch = {}
+                    for key, value_from_rollout in rollout_data.items():
+                        if key == 'tree_structures':
+                            batch[key] = [value_from_rollout[i] for i in mini_batch_indices_list]
+                        elif isinstance(value_from_rollout, torch.Tensor):
+                            batch[key] = value_from_rollout[mini_batch_indices_np]
+                        else:
+                            try:
+                                # Attempt to index with numpy array first (e.g. if it's a list of numpy arrays)
+                                batch[key] = value_from_rollout[mini_batch_indices_np]
+                            except (TypeError, IndexError): # More specific exceptions
+                                try:
+                                    # Fallback to list indexing if numpy array indexing failed
+                                    batch[key] = [value_from_rollout[i] for i in mini_batch_indices_list]
+                                except Exception as e_inner: # Catch any other exception during list indexing
+                                    print(f"Warning: Could not create batch for key '{key}' (type: {type(value_from_rollout)}). Error: {e_inner}. Skipping this key for the batch.")
+
+                    if batch and 'observations' in batch and len(batch['observations']) > 0: # Ensure essential keys are present and batch is not empty
+                        # If RolloutBuffer stored task_trajs, extract batch['task_trajectories_batch'] here
+                        self.train_step(batch, task_trajectories_batch=None) # Pass None for now
+                    elif 'observations' not in batch or len(batch['observations']) == 0 :
+                        print(f"Skipping train_step due to empty or invalid batch for update {update}, epoch {epoch_num}, start_idx {start_idx}")
 
             if update % log_interval == 0:
                 avg_reward = np.mean(list(self.episode_rewards)) if self.episode_rewards else float('nan')
