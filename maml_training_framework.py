@@ -20,13 +20,29 @@ from pathlib import Path
 import copy
 from tqdm import tqdm
 
+import types # Ensure types is imported
+
 # Import existing Janus components
 from symbolic_discovery_env import SymbolicDiscoveryEnv
 from hypothesis_policy_network import HypothesisNet, PPOTrainer
 from progressive_grammar_system import ProgressiveGrammar, Variable
-from enhanced_feedback import IntrinsicRewardCalculator, EnhancedObservationEncoder
 from math_utils import calculate_symbolic_accuracy
 import sympy as sp
+
+# Try to import enhanced feedback if available
+try:
+    from enhanced_feedback import IntrinsicRewardCalculator, EnhancedObservationEncoder
+except ImportError:
+    print("Warning: enhanced_feedback module not found, using basic feedback")
+    IntrinsicRewardCalculator = None
+    EnhancedObservationEncoder = None
+
+# Try to import feedback integration if available
+try:
+    from feedback_integration import add_intrinsic_rewards_to_env
+except ImportError:
+    print("Warning: feedback_integration module not found, intrinsic rewards disabled")
+    add_intrinsic_rewards_to_env = None
 
 # Import our new components
 from physics_task_distribution import PhysicsTaskDistribution, PhysicsTask
@@ -173,16 +189,40 @@ class MetaLearningPolicy(nn.Module):
         # Compute outputs
         policy_logits = self.policy_head(features)
 
-        # FIX: Apply the action mask to the logits before returning
+        # Apply the action mask to the logits before returning
         if action_mask is not None:
-            # Ensure mask is on the same device and has compatible shape
+            # Ensure mask is on the same device
+            action_mask = action_mask.to(policy_logits.device)
+
+            # Handle dimension mismatch by padding or truncating the action_mask
+            if action_mask.shape[-1] < policy_logits.shape[-1]:
+                padding = torch.zeros(
+                    *action_mask.shape[:-1],
+                    policy_logits.shape[-1] - action_mask.shape[-1],
+                    dtype=torch.bool,
+                    device=policy_logits.device
+                )
+                action_mask = torch.cat([action_mask, padding], dim=-1)
+            elif action_mask.shape[-1] > policy_logits.shape[-1]:
+                action_mask = action_mask[..., :policy_logits.shape[-1]]
+
+            # Expand mask if necessary (e.g. if policy_logits has a batch dim and mask doesn't)
             if action_mask.shape != policy_logits.shape:
-                 action_mask = action_mask.expand_as(policy_logits)
-            policy_logits[~action_mask] = -1e9 # Set invalid actions to a very small number
+                try:
+                    action_mask = action_mask.expand_as(policy_logits)
+                except RuntimeError as e:
+                    # This can happen if the mask cannot be broadcast, e.g. wrong number of dims
+                    # Fallback: if mask is 1D and logits are 2D (batch, actions), unsqueeze and expand
+                    if len(action_mask.shape) == 1 and len(policy_logits.shape) == 2:
+                        action_mask = action_mask.unsqueeze(0).expand_as(policy_logits)
+                    else: # Re-raise if we can't handle it
+                        raise e
+
+            policy_logits[~action_mask] = float('-inf') # Set invalid actions to negative infinity
 
         value = self.value_head(features)
         
-        # Physics predictions
+        # Physics predictions (return raw logits)
         symmetry_logits = self.symmetry_detector(features)
         conservation_logits = self.conservation_predictor(features)
         
@@ -197,10 +237,43 @@ class MetaLearningPolicy(nn.Module):
     def act(self, obs: torch.Tensor, task_embedding: Optional[torch.Tensor] = None, action_mask: Optional[torch.Tensor] = None) -> Tuple[int, Dict]:
         """Select action using current policy"""
         with torch.no_grad():
-            outputs = self.forward(obs.unsqueeze(0), task_embedding, action_mask)
+            # Ensure obs is 2D if not already (batch_size, feature_dim)
+            if obs.ndim == 1:
+                obs = obs.unsqueeze(0)
+
+            outputs = self.forward(obs, task_embedding, action_mask)
             
             # Sample from policy
             probs = F.softmax(outputs['policy_logits'], dim=-1)
+
+            # Fallback for NaN or inf probabilities
+            if torch.any(torch.isnan(probs)) or torch.any(torch.isinf(probs)):
+                print(f"Warning: NaN or inf detected in policy probabilities. Logits: {outputs['policy_logits']}")
+                if action_mask is not None:
+                    # Ensure action_mask is 1D for random choice from valid actions
+                    current_action_mask = action_mask
+                    if current_action_mask.ndim > 1:
+                         # Assuming batch size of 1 for .act(), take the first mask
+                        current_action_mask = current_action_mask[0]
+
+                    valid_actions = torch.where(current_action_mask)[0]
+                    if len(valid_actions) > 0:
+                        action = valid_actions[torch.randint(len(valid_actions), (1,))].item()
+                    else:
+                        # No valid actions, default to 0 (this case should ideally be prevented by env)
+                        action = 0
+                        print("Warning: No valid actions in mask during fallback. Defaulting to action 0.")
+                else:
+                    action = 0 # Default action if no mask
+
+                # Default action_info
+                action_info = {
+                    'log_prob': -np.log(probs.shape[-1] if probs.shape[-1] > 0 else 1), # Uniform log_prob
+                    'value': outputs['value'].item() if outputs['value'] is not None else 0.0,
+                    'entropy': 0.0 # Cannot compute entropy reliably
+                }
+                return action, action_info
+
             dist = torch.distributions.Categorical(probs)
             action = dist.sample()
             
@@ -260,10 +333,27 @@ class TaskEnvironmentBuilder:
             reward_config=reward_config
         )
         
+        # Dynamically attach get_action_mask if not present
+        if not hasattr(env, 'get_action_mask'):
+            def get_action_mask(self_env): # Renamed self to self_env
+                if hasattr(self_env, 'current_state') and hasattr(self_env.current_state, 'get_valid_actions'):
+                    valid_actions = self_env.current_state.get_valid_actions()
+                    mask = np.zeros(self_env.action_space.n, dtype=bool)
+                    mask[valid_actions] = True
+                    return mask
+                else:
+                    return np.ones(self_env.action_space.n, dtype=bool) # Default: all actions valid
+
+            env.get_action_mask = types.MethodType(get_action_mask, env)
+
         # Add intrinsic rewards if configured
-        if self.config.use_intrinsic_rewards:
-            from feedback_integration import add_intrinsic_rewards_to_env
-            add_intrinsic_rewards_to_env(env, weight=self.config.intrinsic_weight)
+        if self.config.use_intrinsic_rewards and add_intrinsic_rewards_to_env is not None:
+            try:
+                add_intrinsic_rewards_to_env(env, weight=self.config.intrinsic_weight)
+            except Exception as e:
+                print(f"Warning: Could not add intrinsic rewards: {e}")
+        elif self.config.use_intrinsic_rewards and add_intrinsic_rewards_to_env is None:
+            print("Warning: Intrinsic rewards enabled in config, but feedback_integration module not found. Skipping.")
         
         # Store task metadata in env
         env.task_info = {
@@ -485,8 +575,9 @@ class MAMLTrainer:
                 # Convert observation to tensor
                 obs_tensor = torch.FloatTensor(obs).to(self.config.device)
 
-                # FIX: Get the action mask from the environment
-                action_mask = torch.BoolTensor(env.get_action_mask()).to(self.config.device)
+                # Get the action mask from the environment (should always exist due to TaskEnvironmentBuilder)
+                action_mask_np = env.get_action_mask()
+                action_mask = torch.FloatTensor(action_mask_np).to(self.config.device) # Policy expects FloatTensor
                 
                 # Get action from policy, passing the mask
                 action, action_info = policy.act(obs_tensor, task_context, action_mask) # Pass mask
@@ -563,7 +654,18 @@ class MAMLTrainer:
             
             # Policy loss (REINFORCE with baseline)
             log_probs = F.log_softmax(outputs['policy_logits'], dim=-1)
-            selected_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze()
+
+            # Ensure actions are correctly shaped and clamped before gathering
+            if actions.dim() == 1: # Should be true as actions are collected as a list of ints
+                actions_expanded = actions.unsqueeze(1)
+            else: # Fallback, though not expected with current collection logic
+                actions_expanded = actions
+
+            num_actions_from_logits = log_probs.size(1)
+            # Clamp actions to be within the valid range of policy_logits [0, num_actions_from_logits - 1]
+            actions_clamped = torch.clamp(actions_expanded, 0, num_actions_from_logits - 1)
+
+            selected_log_probs = log_probs.gather(1, actions_clamped).squeeze(-1)
             
             # Compute advantages
             returns = self._compute_returns(rewards)
@@ -907,16 +1009,36 @@ def main():
     print(task_distribution.describe_task_distribution())
     print()
     
-    # Determine observation dimension
-    # Create a sample environment to get observation shape
-    sample_task = task_distribution.sample_task()
-    env_builder = TaskEnvironmentBuilder(config)
-    sample_env = env_builder.build_env(sample_task)
-    obs_dim = sample_env.observation_space.shape[0]
-    action_dim = sample_env.action_space.n
+    # Determine observation and action space dimensions
+    print("Determining observation and action space dimensions...")
+    env_builder = TaskEnvironmentBuilder(config) # Already initialized in current code structure if we place this after config
+
+    max_obs_dim = 0
+    max_action_dim = 0
     
-    print(f"Observation dimension: {obs_dim}")
-    print(f"Action dimension: {action_dim}")
+    # Check a few different tasks
+    sample_tasks = task_distribution.sample_task_batch(5, curriculum=False) # Sample 5 tasks
+    for task in sample_tasks:
+        try:
+            sample_env = env_builder.build_env(task)
+            obs_dim_task = sample_env.observation_space.shape[0]
+            action_dim_task = sample_env.action_space.n
+
+            max_obs_dim = max(max_obs_dim, obs_dim_task)
+            max_action_dim = max(max_action_dim, action_dim_task)
+
+            print(f"  Task: {task.name} - Obs: {obs_dim_task}, Actions: {action_dim_task}")
+        except Exception as e:
+            print(f"  Warning: Could not build environment for {task.name}: {e}")
+
+    # Add some buffer to handle variations
+    obs_dim = max_obs_dim
+    action_dim = max_action_dim + 1  # Add 1 for safety
+
+    # Corrected print statement to avoid issues if used directly in f-string
+    print("\nUsing dimensions:")
+    print(f"  Observation dimension: {obs_dim}")
+    print(f"  Action dimension: {action_dim}")
     print()
     
     # Initialize meta-learning policy
@@ -937,17 +1059,33 @@ def main():
     trainer = MAMLTrainer(config, policy, task_distribution)
     
     # Start training
-    trainer.train()
+    try:
+        trainer.train()
+    except KeyboardInterrupt:
+        # Corrected print statement
+        print("\nTraining interrupted by user")
+        trainer.save_checkpoint(f"{config.checkpoint_dir}/interrupted_checkpoint.pt")
+    except Exception as e:
+        # Corrected print statement
+        print(f"\nTraining failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+        trainer.save_checkpoint(f"{config.checkpoint_dir}/error_checkpoint.pt")
     
     # Final evaluation
+    # Corrected print statement
     print("\nFinal evaluation on diverse tasks...")
-    final_metrics = trainer.evaluate_on_new_tasks(n_tasks=20)
-    
-    print("\nFinal Performance:")
-    print("-" * 30)
-    for key, value in sorted(final_metrics.items()):
-        if "mean" in key:
-            print(f"{key}: {value:.3f}")
+    try:
+        final_metrics = trainer.evaluate_on_new_tasks(n_tasks=20)
+
+        # Corrected print statement
+        print("\nFinal Performance:")
+        print("-" * 30)
+        for key, value in sorted(final_metrics.items()):
+            if "mean" in key:
+                print(f"{key}: {value:.3f}")
+    except Exception as e:
+        print(f"Evaluation failed: {e}")
 
 
 if __name__ == "__main__":
