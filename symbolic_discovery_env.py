@@ -191,7 +191,8 @@ class SymbolicDiscoveryEnv(gym.Env):
         default_reward_config = {
             'completion_bonus':    0.1,
             'validity_bonus':      0.05,
-            'mse_weight':         -1.0,
+            'mse_weight':          1.0,
+            'mse_scale_factor':    1.0,
             'complexity_penalty': -0.01,
             'depth_penalty':      -0.001,
             'timeout_penalty':    -1.0,
@@ -291,7 +292,7 @@ class SymbolicDiscoveryEnv(gym.Env):
         norm = mse / (np.var(tars) + 1e-10)
         reward = (
             self.reward_config.get('completion_bonus', 0.1) +
-            self.reward_config.get('mse_weight', -1.0) * np.log(norm + 1e-10) +
+            self.reward_config.get('mse_weight', 1.0) * np.exp(-self.reward_config.get('mse_scale_factor', 1.0) * norm) +
             self.reward_config.get('complexity_penalty', -0.01) * expr.complexity +
             self.reward_config.get('depth_penalty', -0.001) * self.max_depth
         )
