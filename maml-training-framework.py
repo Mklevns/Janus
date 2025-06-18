@@ -269,7 +269,8 @@ class TaskEnvironmentBuilder:
     
     def _create_task_grammar(self, task: PhysicsTask) -> ProgressiveGrammar:
         """Create grammar with operators appropriate for task"""
-        grammar = ProgressiveGrammar()
+        # Initialize an EMPTY grammar
+        grammar = ProgressiveGrammar(load_defaults=False)
         
         # Base operators for all physics
         base_ops = ['+', '-', '*', '/']
@@ -286,10 +287,11 @@ class TaskEnvironmentBuilder:
             grammar.add_operators(['log', 'exp', '**'])
             
         elif task.domain == "electromagnetism":
-            grammar.add_operators(['**2', '**3', '1/'])
+            # '**2' handles r**2, '1/' is mapped to 'inv' for 1/r
+            grammar.add_operators(['**2', '1/']) # Corrected: removed '**3'
         
-        # Add special operators based on true law
-        if "**" in task.true_law and "**2" not in grammar.operators:
+        # Add special operators based on true law (optional, for guidance)
+        if "**" in task.true_law: # Corrected: removed "and '**2' not in grammar.operators"
             grammar.add_operators(['**'])
         
         return grammar
