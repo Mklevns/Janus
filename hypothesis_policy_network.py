@@ -741,3 +741,299 @@ if __name__ == "__main__":
     # Pass task_trajectories=None to train method, which will propagate to collect_rollouts
     trainer_transformer_meta.train(total_timesteps=256, rollout_length=64, n_epochs=1, batch_size=32, log_interval=1)
     print("PPO with Transformer meta-policy finished.")
+
+
+class AIHypothesisNet(HypothesisNet):
+    def __init__(self,
+                 obs_dim: int, # Required by HypothesisNet
+                 act_dim: int, # Required by HypothesisNet
+                 hidden_dim: int = 256, # Default from HypothesisNet
+                 num_model_types: int = 10, # Max number of different AI model types for embedding
+                 **kwargs: Any): # Catches other args for HypothesisNet (encoder_type, grammar, debug, use_meta_learning)
+        super().__init__(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim, **kwargs)
+
+        # Add model-aware attention mechanism
+        # This attention layer would typically be used to process some representation of the AI model itself,
+        # or to weigh different parts of the observation based on AI model context.
+        # The exact usage (inputs Q,K,V) depends on how AI model information is fed into the network.
+        self.model_attention = nn.MultiheadAttention(
+            embed_dim=self.hidden_dim, # Assumes attention operates on features of size hidden_dim
+            num_heads=8,
+            batch_first=True # Standard practice
+        )
+
+        # Add embedding for different model types
+        # This allows the network to behave differently based on the type of AI model being interpreted.
+        # An integer representing the model type would be passed as input to this embedding layer.
+        self.model_type_embedding = nn.Embedding(
+            num_embeddings=num_model_types, # Max number of model types
+            embedding_dim=self.hidden_dim   # Embedding vector size, chosen to match hidden_dim for easy integration
+        )
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        action_mask: Optional[torch.Tensor] = None,
+        task_trajectories: Optional[torch.Tensor] = None,
+        tree_structure: Optional[Dict[int, List[int]]] = None,
+        ai_model_representation: Optional[torch.Tensor] = None, # New: Input for AI model's state/features
+        ai_model_type_idx: Optional[torch.Tensor] = None # New: Input for AI model type (long tensor of indices)
+    ) -> HypothesisNetOutput:
+        """
+        Forward pass for AIHypothesisNet.
+        Extends base class forward pass to incorporate AI model-specific information.
+
+        Args:
+            obs: Observation tensor from the environment.
+            action_mask: Optional mask for valid actions.
+            task_trajectories: Optional trajectories for meta-learning.
+            tree_structure: Optional tree structure for TreeLSTM encoder.
+            ai_model_representation: A tensor representing features or state of the AI model being interpreted.
+                                     Shape might be (batch_size, seq_len, feature_dim) for attention.
+            ai_model_type_idx: An integer tensor (batch_size, 1) indicating the type of the AI model.
+
+        Returns:
+            HypothesisNetOutput dictionary.
+        """
+        # Get initial tree representation from the base class's encoder part
+        # This requires careful management of how base `forward` is called or its components are used.
+        # Option 1: Call super().forward() and then modify its output (complex if super already does too much).
+        # Option 2: Re-implement parts of super().forward() or make it more modular.
+
+        # Let's assume HypothesisNet.forward is structured such that we can get tree_repr first.
+        # The current HypothesisNet.forward computes tree_repr, then applies policy/value nets.
+        # We need to inject AI-specific features *before* the policy/value heads,
+        # potentially by modifying/augmenting the tree_repr.
+
+        batch_size, obs_dim_flat = obs.shape
+        if obs_dim_flat % self.node_feature_dim != 0: # node_feature_dim is from parent
+            raise ValueError("Observation dimension must be a multiple of node_feature_dim.")
+        num_nodes = obs_dim_flat // self.node_feature_dim
+        tree_features = obs.view(batch_size, num_nodes, self.node_feature_dim)
+
+        if isinstance(self.encoder, TreeEncoder): # self.encoder is from parent
+            base_tree_repr = self.encoder(tree_features, tree_structure)
+        else: # TransformerEncoder
+            base_tree_repr = self.encoder(tree_features) # (batch_size, hidden_dim)
+
+        # Initialize combined_repr with base_tree_repr
+        combined_repr = base_tree_repr
+
+        # 1. Incorporate AI model type embedding
+        if ai_model_type_idx is not None:
+            model_type_embed = self.model_type_embedding(ai_model_type_idx) # (batch_size, 1, hidden_dim) if idx is (B,1)
+            model_type_embed = model_type_embed.squeeze(1) # (batch_size, hidden_dim)
+            # Combine with base_tree_repr, e.g., by addition or concatenation + linear layer
+            combined_repr = combined_repr + model_type_embed # Element-wise addition
+
+        # 2. Incorporate AI model representation using attention
+        if ai_model_representation is not None:
+            # model_attention expects query, key, value.
+            # Query could be the current combined_repr. Key/Value from ai_model_representation.
+            # Reshape combined_repr to be (batch_size, 1, hidden_dim) if it's the query to attend over ai_model_representation.
+            query = combined_repr.unsqueeze(1) # (batch_size, 1, hidden_dim)
+            # ai_model_representation could be (batch_size, seq_len_model, hidden_dim)
+            # If ai_model_representation feature dim is different, it needs projection. Assume it's hidden_dim.
+            attn_output, _ = self.model_attention(query, ai_model_representation, ai_model_representation)
+            # attn_output shape is (batch_size, 1, hidden_dim)
+            attn_output = attn_output.squeeze(1) # (batch_size, hidden_dim)
+
+            # Combine attention output with the representation, e.g., add or gate
+            combined_repr = combined_repr + attn_output # Element-wise addition
+
+        # Now, `combined_repr` is the augmented representation.
+        # Proceed with policy and value heads, similar to HypothesisNet.forward
+        # This part duplicates logic from HypothesisNet.forward's latter half.
+        # Ideally, HypothesisNet would have a method like `_run_heads(self, state_repr)`
+
+        task_embedding_vector = None # From meta-learning, similar to parent
+        gains_policy = torch.ones(batch_size, self.hidden_dim // 2, device=combined_repr.device)
+        biases_policy = torch.zeros(batch_size, self.hidden_dim // 2, device=combined_repr.device)
+        gains_value = torch.ones(batch_size, self.hidden_dim // 2, device=combined_repr.device)
+        biases_value = torch.zeros(batch_size, self.hidden_dim // 2, device=combined_repr.device)
+
+        if self.use_meta_learning and self.task_encoder is not None and self.task_modulator is not None and task_trajectories is not None:
+            # This meta-learning logic is copied from HypothesisNet.forward
+            # (Ensure self.task_encoder, self.task_modulator are accessible if initialized in super)
+            bt_size, num_traj, traj_len, feat_dim = task_trajectories.shape
+            if bt_size > 0:
+                task_trajectories_reshaped = task_trajectories.view(bt_size * num_traj, traj_len, feat_dim)
+                if task_trajectories_reshaped.shape[0] > 0:
+                    _, (hidden, _) = self.task_encoder(task_trajectories_reshaped)
+                    hidden_concat = torch.cat((hidden[0,:,:], hidden[1,:,:]), dim=-1)
+                    hidden = hidden.transpose(0, 1).reshape(bt_size * num_traj, self.hidden_dim)
+                    task_embedding_vector = hidden.view(bt_size, num_traj, self.hidden_dim).mean(dim=1)
+                    modulation_params = self.task_modulator(task_embedding_vector)
+                    all_gains_raw, all_biases_raw = modulation_params.chunk(2, dim=-1)
+                    gains_policy_raw, gains_value_raw = all_gains_raw.chunk(2, dim=-1)
+                    biases_policy_raw, biases_value_raw = all_biases_raw.chunk(2, dim=-1)
+                    gains_policy = 1 + 0.1 * torch.tanh(gains_policy_raw)
+                    biases_policy = 0.1 * torch.tanh(biases_policy_raw)
+                    gains_value = 1 + 0.1 * torch.tanh(gains_value_raw)
+                    biases_value = 0.1 * torch.tanh(biases_value_raw)
+
+        x_policy = combined_repr
+        modulated_policy = False
+        for i, layer in enumerate(self.policy_net): # self.policy_net from parent
+            x_policy = layer(x_policy)
+            if isinstance(layer, nn.ReLU) and self.use_meta_learning and task_trajectories is not None and not modulated_policy:
+                if x_policy.shape[-1] == self.hidden_dim // 2:
+                    x_policy = x_policy * gains_policy + biases_policy
+                    modulated_policy = True
+        policy_logits = x_policy
+
+        x_value = combined_repr
+        modulated_value = False
+        for i, layer in enumerate(self.value_net): # self.value_net from parent
+            x_value = layer(x_value)
+            if isinstance(layer, nn.ReLU) and self.use_meta_learning and task_trajectories is not None and not modulated_value:
+                if x_value.shape[-1] == self.hidden_dim // 2:
+                    x_value = x_value * gains_value + biases_value
+                    modulated_value = True
+        value = x_value
+
+        masked_logits = policy_logits
+        if action_mask is not None:
+            if action_mask.shape[0] == policy_logits.shape[0]:
+                 masked_logits = policy_logits.clone()
+                 masked_logits[~action_mask] = -1e9
+
+        action_logits = masked_logits.nan_to_num(nan=-1e9, posinf=1e9, neginf=-1e9)
+
+        return_dict: HypothesisNetOutput = {
+            'action_logits': action_logits,
+            'value': value,
+            'tree_representation': combined_repr # Return the augmented representation
+        }
+        if self.use_meta_learning and task_embedding_vector is not None:
+            return_dict['task_embedding'] = task_embedding_vector
+
+        return return_dict
+
+    # get_action can be inherited from HypothesisNet if its call to self.forward()
+    # correctly passes through the new optional arguments (ai_model_representation, ai_model_type_idx).
+    # If get_action in parent is: self.forward(obs_tensor, action_mask, task_trajectories, tree_structure)
+    # then AIHypothesisNet.get_action needs to be overridden to pass the new args.
+
+    def get_action(
+        self,
+        obs: Union[np.ndarray, torch.Tensor],
+        action_mask: Optional[torch.Tensor] = None,
+        task_trajectories: Optional[torch.Tensor] = None,
+        tree_structure: Optional[Dict[int, List[int]]] = None,
+        ai_model_representation: Optional[torch.Tensor] = None, # New
+        ai_model_type_idx: Optional[torch.Tensor] = None,      # New
+        deterministic: bool = False
+    ) -> Tuple[int, float, float]:
+
+        if isinstance(obs, np.ndarray):
+            obs_tensor = torch.FloatTensor(obs).unsqueeze(0)
+        else:
+            obs_tensor = obs
+
+        if obs_tensor.ndim == 1:
+            obs_tensor = obs_tensor.unsqueeze(0)
+
+        # Call AIHypothesisNet's forward method
+        outputs = self.forward(
+            obs_tensor,
+            action_mask=action_mask,
+            task_trajectories=task_trajectories,
+            tree_structure=tree_structure,
+            ai_model_representation=ai_model_representation, # Pass new arg
+            ai_model_type_idx=ai_model_type_idx             # Pass new arg
+        )
+
+        dist = Categorical(logits=outputs['action_logits'])
+        action_tensor = torch.argmax(outputs['action_logits'], dim=-1) if deterministic else dist.sample()
+        log_prob_tensor = dist.log_prob(action_tensor)
+        value_tensor = outputs['value']
+
+        action_val: int = action_tensor[0].item()
+        log_prob_val: float = log_prob_tensor[0].item()
+        value_val: float = value_tensor[0].squeeze().item()
+
+        return action_val, log_prob_val, value_val
+
+
+if __name__ == "__main__":
+    # ... (previous __main__ content from HypothesisNet) ...
+    # Keep the existing __main__ for HypothesisNet tests, then add AIHypothesisNet tests.
+
+    # Ensure SymbolicDiscoveryEnv can provide 'tree_structure' in info dict from reset/step if TreeEncoder is used.
+    env = SymbolicDiscoveryEnv(grammar, data, variables, max_depth=5, max_complexity=10, provide_tree_structure=True) # Added flag
+
+    obs_dim, action_dim = env.observation_space.shape[0], env.action_space.n
+
+    # Test Transformer (original HypothesisNet)
+    # ... (keep existing test for policy_transformer) ...
+
+    print("\n--- Testing AIHypothesisNet ---")
+    ai_policy_transformer = AIHypothesisNet(
+        obs_dim, action_dim, grammar=grammar,
+        use_meta_learning=True, encoder_type='transformer',
+        hidden_dim=256 # Example hidden_dim
+    )
+    print(f"AIPolicy (Transformer, Meta) params: {sum(p.numel() for p in ai_policy_transformer.parameters())}")
+
+    obs, info = safe_env_reset(env) # Use existing env and obs
+    obs_tensor = torch.FloatTensor(np.array(obs)).unsqueeze(0)
+    action_mask_np = env.get_action_mask()
+    action_mask_tensor = torch.BoolTensor(action_mask_np).unsqueeze(0)
+
+    # Dummy AI model related inputs
+    dummy_ai_model_repr = torch.randn(1, 5, ai_policy_transformer.hidden_dim) # (batch, seq_len, hidden_dim)
+    dummy_ai_model_type = torch.randint(0, 10, (1,), dtype=torch.long) # (batch_size) -> unsqueeze for (B,1) later if needed by embedding
+
+    outputs_ai_transformer_meta = ai_policy_transformer.forward(
+        obs_tensor,
+        action_mask_tensor,
+        task_trajectories=dummy_trajs, # from previous test
+        ai_model_representation=dummy_ai_model_repr,
+        ai_model_type_idx=dummy_ai_model_type
+    )
+    print("Outputs (AIHypothesisNet, Transformer, Meta, with AI inputs):")
+    for k, v_ in outputs_ai_transformer_meta.items(): print(f"  {k}: {v_.shape if isinstance(v_, torch.Tensor) else v_}")
+
+    # Test get_action for AIHypothesisNet
+    action_info_ai = ai_policy_transformer.get_action(
+        obs_tensor,
+        action_mask=action_mask_tensor,
+        task_trajectories=dummy_trajs,
+        ai_model_representation=dummy_ai_model_repr,
+        ai_model_type_idx=dummy_ai_model_type
+    )
+    print(f"AIHypothesisNet get_action output (action, log_prob, value): {action_info_ai}")
+
+
+    # Test PPO with AIHypothesisNet
+    # Note: The PPOTrainer.collect_rollouts would need to be adapted if ai_model_representation
+    # and ai_model_type_idx are environment-dependent and change per step.
+    # For this test, we can assume they are fixed or passed as None to collect_rollouts,
+    # which means the AI-specific parts of AIHypothesisNet might not be fully utilized during this PPO test
+    # unless collect_rollouts is modified to provide these tensors.
+    # For now, let's assume PPOTrainer would pass them as None if not available.
+    # The get_action in AIHypothesisNet handles None for these new args.
+
+    print("\nTesting PPO with AIHypothesisNet (Transformer, meta)...")
+    # Need an env that provides ai_model_representation and ai_model_type_idx if they are to be used in PPO.
+    # Or, PPOTrainer needs modification to handle these.
+    # For this unit test, we'll use the base SymbolicDiscoveryEnv.
+    # The AI-specific parts of AIHypothesisNet will effectively be unused if the inputs are None.
+
+    ppo_trainer_ai = PPOTrainer(ai_policy_transformer, env)
+    # The current PPOTrainer.collect_rollouts calls policy.get_action without the new AI args.
+    # To fully test, either PPOTrainer needs an update, or we test AIHypothesisNet forward/get_action directly as above.
+    # This PPO run will thus not exercise the new AI-specific pathways in AIHypothesisNet's forward pass
+    # because `collect_rollouts` won't supply `ai_model_representation` or `ai_model_type_idx`.
+    # However, it tests if AIHypothesisNet can still run within the PPO framework (gracefully handling missing AI inputs).
+
+    print("Note: PPO run with AIHypothesisNet will use None for AI-specific inputs in get_action via collect_rollouts.")
+    ppo_trainer_ai.train(total_timesteps=256, rollout_length=64, n_epochs=1, batch_size=32, log_interval=1)
+    print("PPO with AIHypothesisNet finished.")
+
+    # Final original PPO test
+    print("\nTesting PPO with original HypothesisNet (Transformer meta-policy)...")
+    trainer_transformer_meta = PPOTrainer(policy_transformer, env)
+    trainer_transformer_meta.train(total_timesteps=256, rollout_length=64, n_epochs=1, batch_size=32, log_interval=1)
+    print("PPO with original HypothesisNet finished.")
