@@ -182,7 +182,9 @@ class SymbolicDiscoveryEnv(gym.Env):
         max_complexity: int = 30,
         reward_config: Optional[Dict[str, Any]] = None,
         max_nodes: int = 50,
-        target_variable_index: Optional[int] = None
+        target_variable_index: Optional[int] = None,
+        action_space_size: Optional[int] = None, # Added parameter
+        provide_tree_structure: bool = False # Added parameter
     ):
         super().__init__()
         self.grammar = grammar
@@ -191,6 +193,7 @@ class SymbolicDiscoveryEnv(gym.Env):
         self.max_depth = max_depth
         self.max_complexity = max_complexity
         self.max_nodes = max_nodes
+        self.provide_tree_structure = provide_tree_structure
         self.target_variable_index = target_variable_index if target_variable_index is not None else -1
         # Ensure target_variable_index is a valid integer index for array slicing
         if self.target_variable_index == -1:
@@ -215,7 +218,8 @@ class SymbolicDiscoveryEnv(gym.Env):
         self.max_steps = 100
         self._evaluation_cache: Dict[str, Any] = {}
         self.action_to_element = _build_action_space(grammar, variables)
-        self.action_space = spaces.Discrete(len(self.action_to_element))
+        n_actions = action_space_size if action_space_size is not None else len(self.action_to_element)
+        self.action_space = spaces.Discrete(n_actions)
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,

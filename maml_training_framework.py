@@ -291,7 +291,7 @@ class TaskEnvironmentBuilder:
         self.config = config
         self.observation_encoder = EnhancedObservationEncoder()
         
-    def build_env(self, task: PhysicsTask) -> SymbolicDiscoveryEnv:
+    def build_env(self, task: PhysicsTask, max_action_space: Optional[int] = None) -> SymbolicDiscoveryEnv:
         """Create environment for specific physics task"""
         
         # Generate training data
@@ -330,7 +330,8 @@ class TaskEnvironmentBuilder:
             variables=variables,
             max_depth=self.config.max_tree_depth,
             max_complexity=self.config.max_complexity,
-            reward_config=reward_config
+            reward_config=reward_config,
+            action_space_size=max_action_space # Added line
         )
         
         # Dynamically attach get_action_mask if not present
@@ -442,7 +443,7 @@ class MAMLTrainer:
         
         for task_idx, task in enumerate(tasks):
             # Create environment for this task
-            env = self.env_builder.build_env(task)
+            env = self.env_builder.build_env(task, max_action_space=self.policy.action_dim)
             
             # Clone policy for inner loop adaptation
             adapted_policy = self._clone_policy()
@@ -577,7 +578,7 @@ class MAMLTrainer:
 
                 # Get the action mask from the environment (should always exist due to TaskEnvironmentBuilder)
                 action_mask_np = env.get_action_mask()
-                action_mask = torch.FloatTensor(action_mask_np).to(self.config.device) # Policy expects FloatTensor
+                action_mask = torch.BoolTensor(action_mask_np).to(self.config.device)
                 
                 # Get action from policy, passing the mask
                 action, action_info = policy.act(obs_tensor, task_context, action_mask) # Pass mask
@@ -828,7 +829,7 @@ class MAMLTrainer:
         )
         
         for task in tqdm(eval_tasks, desc="Evaluating"):
-            env = self.env_builder.build_env(task)
+            env = self.env_builder.build_env(task, max_action_space=self.policy.action_dim)
             
             # Clone policy for adaptation
             adapted_policy = self._clone_policy()
