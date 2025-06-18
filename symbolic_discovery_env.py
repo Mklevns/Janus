@@ -20,7 +20,6 @@ def float_cast(val):
     """Ensure native Python float for torch assignment and handle non-finite values."""
     try:
         f_val = float(val)
-        # FIX: Check for nan, inf, and -inf and replace with a neutral value like 0.0
         if not np.isfinite(f_val):
             return 0.0
         return f_val

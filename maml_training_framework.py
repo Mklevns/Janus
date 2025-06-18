@@ -511,7 +511,8 @@ class MAMLTrainer:
             task_grad = torch.autograd.grad(
                 query_loss,
                 self.policy.parameters(),
-                retain_graph=True
+                retain_graph=True,
+                allow_unused=True # FIX: Prevents crash when graph is broken by NaNs or other issues.
             )
             task_gradients.append(task_grad)
             
@@ -525,9 +526,10 @@ class MAMLTrainer:
         
         # Manually set gradients (MAML-style)
         for param_idx, param in enumerate(self.policy.parameters()):
-            param.grad = sum(
-                task_grad[param_idx] for task_grad in task_gradients
-            ) / len(task_gradients)
+            # Filter out None gradients that result from allow_unused=True
+            valid_grads = [g[param_idx] for g in task_gradients if g is not None and g[param_idx] is not None]
+            if valid_grads:
+                param.grad = sum(valid_grads) / len(valid_grads)
         
         # Clip gradients
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)

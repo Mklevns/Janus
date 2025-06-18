@@ -199,14 +199,14 @@ class IntrinsicRewardCalculator:
                 # Substitute values and evaluate
                 evaluated_value = sympy_expr.subs(substitution_dict).evalf()
 
-                # Check if the result is a number (SymPy can return symbolic results)
-                if isinstance(evaluated_value, (sympy.Number, float, int)):
+                # Check if the result is complex or symbolic
+                if (isinstance(evaluated_value, sympy.Expr) and evaluated_value.has(sympy.I)) or not evaluated_value.is_number:
+                     print(f"Warning: Expression '{expression_str}' evaluated to non-numeric type '{type(evaluated_value)}' for data row {i}: {evaluated_value}")
+                     evaluated_results.append(np.nan)
+                elif isinstance(evaluated_value, (sympy.Number, float, int)):
                     evaluated_results.append(float(evaluated_value))
                 elif evaluated_value == sympy.zoo or evaluated_value == sympy.oo or evaluated_value == -sympy.oo: # Check for infinity
                     print(f"Warning: Expression '{expression_str}' evaluated to infinity for data row {i}.")
-                    evaluated_results.append(np.nan)
-                elif hasattr(evaluated_value, 'is_Symbol') and evaluated_value.is_Symbol: # e.g. if a symbol remains
-                    print(f"Warning: Expression '{expression_str}' resulted in a symbolic expression for data row {i}: {evaluated_value}")
                     evaluated_results.append(np.nan)
                 else: # Catch other non-numeric results
                     print(f"Warning: Expression '{expression_str}' evaluated to non-numeric type '{type(evaluated_value)}' for data row {i}: {evaluated_value}")
