@@ -592,8 +592,9 @@ class AdvancedJanusTrainer:
         # Run comprehensive evaluation
         experiment_config = ExperimentConfig(
             name=f"final_eval_{self.config.target_phenomena}",
+            experiment_type='physics_discovery_example', # Added field
             environment_type=self.config.target_phenomena,
-            algorithm='janus_full',
+            algorithm='janus_full', # This will be used by the experiment's run method
             env_params={},
             noise_level=0.0,
             max_experiments=1000,

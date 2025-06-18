@@ -24,6 +24,7 @@ class TestExperimentRunner:
 
         mock_config_instance = ExperimentConfig(
             name="test_janus_extraction_mocked",
+            experiment_type='physics_discovery_example', # Added field
             environment_type='harmonic_oscillator',
             algorithm='janus_full',
             env_params={'k': 1.0, 'm': 1.0},
@@ -79,6 +80,7 @@ class TestExperimentRunner:
         target_col_idx = 0 # Target is the first column
         config = ExperimentConfig(
             name="test_genetic_target_idx",
+            experiment_type='physics_discovery_example', # Added field
             environment_type='harmonic_oscillator', # Doesn't matter much for this test
             algorithm='genetic',
             target_variable_index=target_col_idx,
@@ -158,6 +160,7 @@ class TestExperimentRunner:
         target_col_idx = 1 # Target is the second column
         config = ExperimentConfig(
             name="test_rl_target_idx_instantiation",
+            experiment_type='physics_discovery_example', # Added field
             environment_type='pendulum', # Example, doesn't deeply matter
             algorithm='janus_full', # This uses SymbolicDiscoveryEnv
             target_variable_index=target_col_idx,

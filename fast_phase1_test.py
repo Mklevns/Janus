@@ -7,6 +7,7 @@ def run_fast_test():
     # Just test genetic algorithm - it's faster and more stable
     config = ExperimentConfig(
         name="fast_test_genetic",
+        experiment_type='physics_discovery_example', # Added field
         environment_type='harmonic_oscillator',
         algorithm='genetic',
         env_params={'k': 1.0, 'm': 1.0},

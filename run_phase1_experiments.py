@@ -78,6 +78,7 @@ class Phase1Validator:
         for algo in ['janus_full', 'genetic', 'random']:
             config = ExperimentConfig(
                 name=f"P1_HarmonicOscillator_{algo}",
+                experiment_type='physics_discovery_example', # Added field
                 environment_type='harmonic_oscillator',
                 algorithm=algo,
                 env_params={'k': 1.0, 'm': 1.0},
@@ -114,6 +115,7 @@ class Phase1Validator:
         for algo in ['janus_full', 'genetic', 'random']:
             config = ExperimentConfig(
                 name=f"P1_Pendulum_SmallAngle_{algo}",
+                experiment_type='physics_discovery_example', # Added field
                 environment_type='pendulum',
                 algorithm=algo,
                 env_params={'g': 9.81, 'l': 1.0, 'm': 1.0, 'small_angle': True},
@@ -138,6 +140,7 @@ class Phase1Validator:
         for algo in ['janus_full', 'genetic']:  # Skip random for complex system
             config = ExperimentConfig(
                 name=f"P1_Kepler_Orbit_{algo}",
+                experiment_type='physics_discovery_example', # Added field
                 environment_type='kepler',
                 algorithm=algo,
                 env_params={'G': 1.0, 'M': 1.0},
