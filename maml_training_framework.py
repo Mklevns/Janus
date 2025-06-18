@@ -511,30 +511,25 @@ class MAMLTrainer:
         return trajectories
     
     def _compute_task_embedding(self, trajectories: List[Dict]) -> torch.Tensor:
-        """Compute task embedding from support trajectories"""
-        
-        # Aggregate trajectory statistics
+        """
+        Computes the task context by collecting all observations from support trajectories.
+        This sequence will be fed into the policy's task encoder (LSTM).
+        """
         all_obs = []
-        all_rewards = []
-        all_actions = []
-        
         for traj in trajectories:
-            all_obs.extend(traj['observations'])
-            all_rewards.extend(traj['rewards'])
-            all_actions.extend(traj['actions'])
-        
-        # Create embedding from trajectory statistics
-        obs_tensor = torch.FloatTensor(all_obs).to(self.config.device)
-        
-        # Simple statistics as task context
-        task_features = torch.cat([
-            obs_tensor.mean(dim=0),
-            obs_tensor.std(dim=0),
-            torch.tensor(all_rewards).mean().unsqueeze(0).to(self.config.device),
-            torch.tensor(all_rewards).std().unsqueeze(0).to(self.config.device)
-        ])
-        
-        return task_features
+            # Ensure 'observations' key exists and is not empty
+            if 'observations' in traj and traj['observations']:
+                all_obs.extend(traj['observations'])
+
+        if not all_obs:
+            # Handle cases where no observations were collected
+            # Return a zero tensor of the correct shape to avoid downstream errors
+            # NOTE: You need to know the observation dimension here. We can get it from the policy.
+            obs_dim = self.policy.observation_dim
+            return torch.zeros((1, obs_dim), device=self.config.device)
+
+        # Return a 2D tensor of all observations from the support set: (sequence_length, feature_size)
+        return torch.FloatTensor(all_obs).to(self.config.device)
     
     def _compute_trajectory_loss(self,
                                 policy: MetaLearningPolicy,
