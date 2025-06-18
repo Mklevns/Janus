@@ -43,7 +43,9 @@ class Expression:
 
     def _to_sympy(self) -> sp.Expr:
         if self.operator == 'var':
-            return sp.Symbol(self.operands[0])
+            if isinstance(self.operands[0], sp.Symbol):
+                return self.operands[0]  # Already a symbol
+            return sp.Symbol(self.operands[0]) # Create from string name
         elif self.operator == 'const':
             return sp.Float(self.operands[0])
         elif self.operator in ['+', '-', '*', '/', '**']:

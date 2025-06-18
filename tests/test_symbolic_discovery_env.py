@@ -181,21 +181,155 @@ class TestSymbolicDiscoveryEnv(unittest.TestCase):
         reward_from_col2_target = env_default_target._evaluate_expression()
 
         self.assertNotAlmostEqual(reward_from_col1_target, reward_from_col2_target,
-                                  "Rewards should differ based on target_variable_index")
+                                  msg="Rewards should differ based on target_variable_index", places=5)
 
         # Expected norm_mse for col 1 target:
         preds_c1 = np.array([10.0, 11.0, 12.0])
         tars_c1 = target_data_for_test[:, 1] # 10, 20, 30
         mse_c1 = np.mean((preds_c1 - tars_c1)**2) # 135.0
         norm_mse_c1 = mse_c1 / (np.var(tars_c1) + 1e-10) # 135.0 / (200/3) = 2.025
+
+        # The reward calculation in _evaluate_expression now ALWAYS uses np.exp and mse_scale_factor.
+        # For env_explicit_target, reward_config is {'mse_weight': -1.0}.
+        # mse_scale_factor will be fetched with its default from get(), which is 1.0.
+        # mse_weight will be -1.0 from the config.
+        # completion_bonus defaults to 0.1
+        # complexity_penalty defaults to -0.01
+        # depth_penalty defaults to -0.001
+
+        expected_mse_weight = env_explicit_target.reward_config.get('mse_weight', 1.0) # Should be -1.0
+        expected_mse_scale_factor = env_explicit_target.reward_config.get('mse_scale_factor', 1.0) # Should be 1.0 (default)
+
         expected_reward_c1 = (env_explicit_target.reward_config.get('completion_bonus', 0.1) +
-                              env_explicit_target.reward_config.get('mse_weight', -1.0) * np.log(norm_mse_c1 + 1e-10) +
+                              expected_mse_weight * np.exp(-expected_mse_scale_factor * norm_mse_c1) +
                               env_explicit_target.reward_config.get('complexity_penalty', -0.01) * root_node.to_expression(self.grammar).complexity +
                               env_explicit_target.reward_config.get('depth_penalty', -0.001) * env_explicit_target.max_depth)
 
-
         self.assertAlmostEqual(reward_from_col1_target, expected_reward_c1, places=5,
                                msg="Reward for target_index=1 does not match expected calculation.")
+
+    def test_reward_function_mse_component(self):
+        """
+        Tests the MSE component of the reward function with new parameters.
+        """
+        reward_config_test = {
+            'completion_bonus': 0.1,
+            'mse_weight': 1.0,  # Positive weight
+            'mse_scale_factor': 0.5,
+            'complexity_penalty': -0.01,
+            'depth_penalty': -0.001, # Assuming max_depth might be used
+        }
+
+        # Environment for this specific test
+        test_env = SymbolicDiscoveryEnv(
+            grammar=self.grammar,
+            target_data=self.target_data, # Uses self.target_data [[1,2,3], [2,3,4], [3,4,5], [4,5,6]]
+            variables=self.variables,     # Uses self.variables [v0 (index 0)]
+            max_depth=3,                  # Corresponds to depth_penalty calculation if used
+            max_complexity=10,
+            reward_config=reward_config_test,
+            target_variable_index=2 # Target is column 2: [3,4,5,6]
+        )
+        self.assertEqual(test_env.target_variable_index, 2)
+
+        # --- Scenario 1: Low MSE ---
+        # Expression: v0 + 2.0. For v0=[1,2,3,4], preds=[3,4,5,6]. Targets=[3,4,5,6]. MSE = 0.
+        const_val_low_mse = 2.0
+        root_low_mse = ExpressionNode(node_type=NodeType.OPERATOR, value='+')
+        var_node_v0_low = ExpressionNode(node_type=NodeType.VARIABLE, value=self.variables[0], parent=root_low_mse)
+        const_node_low = ExpressionNode(node_type=NodeType.CONSTANT, value=const_val_low_mse, parent=root_low_mse)
+        root_low_mse.children = [var_node_v0_low, const_node_low]
+        test_env.current_state.root = root_low_mse
+        self.assertTrue(test_env.current_state.is_complete(), "Low MSE tree not complete")
+
+        expr_low_mse = root_low_mse.to_expression(self.grammar)
+        expr_complexity_low = expr_low_mse.complexity # Assume complexity = 3 (var, const, op)
+
+        preds_low = np.array([self.variables[0].symbolic.subs({self.variables[0].symbolic: r[0]}) + const_val_low_mse for r in self.target_data])
+        tars_low = self.target_data[:, test_env.target_variable_index]
+        mse_low = np.mean((preds_low - tars_low)**2)
+        self.assertAlmostEqual(mse_low, 0.0, places=5, msg="MSE for low scenario should be near zero.")
+
+        norm_low = float(mse_low / (np.var(tars_low) + 1e-10)) # Ensure float
+        self.assertAlmostEqual(norm_low, 0.0, places=5, msg="Norm_MSE for low scenario should be near zero.")
+
+        expected_reward_low_mse = (
+            reward_config_test['completion_bonus'] +
+            reward_config_test['mse_weight'] * np.exp(-reward_config_test['mse_scale_factor'] * norm_low) +
+            reward_config_test['complexity_penalty'] * float(expr_complexity_low) + # Ensure float
+            reward_config_test['depth_penalty'] * float(test_env.max_depth) # Ensure float
+        )
+        actual_reward_low_mse = test_env._evaluate_expression()
+        self.assertAlmostEqual(actual_reward_low_mse, expected_reward_low_mse, places=5,
+                               msg="Reward for low MSE scenario does not match expected.")
+
+        # --- Scenario 2: High MSE ---
+        # Expression: v0 + 10.0. For v0=[1,2,3,4], preds=[11,12,13,14]. Targets=[3,4,5,6].
+        const_val_high_mse = 10.0
+        root_high_mse = ExpressionNode(node_type=NodeType.OPERATOR, value='+')
+        var_node_v0_high = ExpressionNode(node_type=NodeType.VARIABLE, value=self.variables[0], parent=root_high_mse)
+        const_node_high = ExpressionNode(node_type=NodeType.CONSTANT, value=const_val_high_mse, parent=root_high_mse)
+        root_high_mse.children = [var_node_v0_high, const_node_high]
+        test_env.current_state.root = root_high_mse # Update env to use this new expression
+        self.assertTrue(test_env.current_state.is_complete(), "High MSE tree not complete")
+
+        expr_high_mse = root_high_mse.to_expression(self.grammar)
+        expr_complexity_high = expr_high_mse.complexity # Assume complexity = 3
+
+        preds_high = np.array([self.variables[0].symbolic.subs({self.variables[0].symbolic: r[0]}) + const_val_high_mse for r in self.target_data])
+        tars_high = self.target_data[:, test_env.target_variable_index] # Same targets
+        mse_high = np.mean((preds_high - tars_high)**2) # (11-3)^2=64, (12-4)^2=64, (13-5)^2=64, (14-6)^2=64. MSE = 64.
+        self.assertAlmostEqual(mse_high, 64.0, places=5, msg="MSE for high scenario calculation error.")
+
+        norm_high = float(mse_high / (np.var(tars_high) + 1e-10)) # Ensure float; var([3,4,5,6]) = 1.25. norm_high = 64 / 1.25 = 51.2
+        self.assertAlmostEqual(norm_high, 51.2, places=5, msg="Norm_MSE for high scenario calculation error.")
+
+        expected_reward_high_mse = (
+            reward_config_test['completion_bonus'] +
+            reward_config_test['mse_weight'] * np.exp(-reward_config_test['mse_scale_factor'] * norm_high) +
+            reward_config_test['complexity_penalty'] * float(expr_complexity_high) + # Ensure float
+            reward_config_test['depth_penalty'] * float(test_env.max_depth) # Ensure float
+        )
+        actual_reward_high_mse = test_env._evaluate_expression()
+        self.assertAlmostEqual(actual_reward_high_mse, expected_reward_high_mse, places=5,
+                               msg="Reward for high MSE scenario does not match expected.")
+
+        self.assertTrue(actual_reward_low_mse > actual_reward_high_mse,
+                        f"Low MSE reward ({actual_reward_low_mse}) should be greater than high MSE reward ({actual_reward_high_mse}).")
+
+        # --- Scenario 3: Impact of mse_scale_factor ---
+        # Using the high MSE expression (v0 + 10.0), vary mse_scale_factor
+        reward_config_scale_varied = {
+            'completion_bonus': 0.1,
+            'mse_weight': 1.0,
+            'mse_scale_factor': 0.1, # Smaller scale factor
+            'complexity_penalty': -0.01,
+            'depth_penalty': -0.001,
+        }
+        test_env_scale_varied = SymbolicDiscoveryEnv(
+            grammar=self.grammar, target_data=self.target_data, variables=self.variables,
+            max_depth=3, max_complexity=10, reward_config=reward_config_scale_varied,
+            target_variable_index=2
+        )
+        test_env_scale_varied.current_state.root = root_high_mse # Same high MSE expression
+
+        expected_reward_high_mse_small_scale = (
+            reward_config_scale_varied['completion_bonus'] +
+            reward_config_scale_varied['mse_weight'] * np.exp(-reward_config_scale_varied['mse_scale_factor'] * norm_high) + # norm_high is float from previous calc
+            reward_config_scale_varied['complexity_penalty'] * float(expr_complexity_high) + # Ensure float
+            reward_config_scale_varied['depth_penalty'] * float(test_env_scale_varied.max_depth) # Ensure float
+        )
+        actual_reward_high_mse_small_scale = test_env_scale_varied._evaluate_expression()
+        self.assertAlmostEqual(actual_reward_high_mse_small_scale, expected_reward_high_mse_small_scale, places=5,
+                               msg="Reward for high MSE with smaller scale_factor does not match.")
+
+        # With a smaller mse_scale_factor, the penalty for MSE is less severe, so reward should be higher
+        # than the reward with a larger mse_scale_factor for the same high MSE.
+        # actual_reward_high_mse was with mse_scale_factor = 0.5
+        # actual_reward_high_mse_small_scale is with mse_scale_factor = 0.1
+        self.assertTrue(actual_reward_high_mse_small_scale > actual_reward_high_mse,
+                        f"Reward with smaller mse_scale_factor ({actual_reward_high_mse_small_scale}) "
+                        f"should be greater than with larger mse_scale_factor ({actual_reward_high_mse}) for the same high MSE.")
 
 
 if __name__ == '__main__':
