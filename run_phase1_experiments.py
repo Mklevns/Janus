@@ -39,6 +39,7 @@ from experiment_runner import (
 from experiment_visualizer import ExperimentVisualizer, perform_statistical_tests
 from utils import calculate_symbolic_accuracy, _count_operations
 from integrated_pipeline import JanusConfig, SyntheticDataParamsConfig, RewardConfig
+from math_utils import safe_env_reset # Added import
 
 logging.basicConfig(
     level=logging.INFO,
@@ -257,7 +258,7 @@ class Phase1Validator:
             discovery_env_random = SymbolicDiscoveryEnv(grammar=grammar, target_data=env_data, variables=discovered_vars, **sde_params_random)
             best_expr_random, best_mse_random = None, float('inf')
             for _ in range(100): # Fewer episodes for random
-                obs, _ = discovery_env_random.reset()
+                obs, _ = safe_env_reset(discovery_env_random) # Use safe_env_reset
                 done = False
                 while not done:
                     action_mask = discovery_env_random.get_action_mask()
