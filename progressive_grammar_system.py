@@ -79,7 +79,7 @@ class Expression:
                     or (isinstance(denominator, sp.Expr)
                         and denominator.is_zero is True)
                 ):
-                    return sp.nan
+                    return sp.Float('nan')
                 return args[0] / denominator
             elif self.operator == '**':
                 return args[0] ** args[1]
@@ -98,7 +98,7 @@ class Expression:
             elif self.operator == 'inv':
                 if ((isinstance(arg, (int, float, sp.Integer, sp.Float)) and arg == 0)
                         or (isinstance(arg, sp.Expr) and arg.is_zero is True)):
-                    return sp.nan
+                    return sp.Float('nan')
                 return 1 / arg
             elif self.operator == 'sqrt':
                 return sp.sqrt(arg)

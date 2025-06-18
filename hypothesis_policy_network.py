@@ -341,6 +341,7 @@ class PPOTrainer:
         # Removed episode_complexities and episode_mse as they were not consistently updated/used.
 
     def collect_rollouts(self, n_steps: int, task_trajectories: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        # Reset is called here. Max_size is part of buffer's own state, not reset by collect_rollouts.
         self.rollout_buffer.reset()
         obs, info = self.env.reset() # Standard reset signature
         # tree_structure may come from info if env provides it
@@ -425,28 +426,60 @@ class PPOTrainer:
                 print(f"Update {update}/{n_updates}, Avg Reward: {avg_reward:.3f}")
 
 class RolloutBuffer:
-    def __init__(self): self.reset()
-    def reset(self):
-        self.observations, self.actions, self.rewards, self.values = [], [], [], []
-        self.log_probs, self.dones, self.action_masks = [], [], []
-        self.tree_structures: List[Optional[Dict[int,List[int]]]] = [] # Added to store tree_structures
-        self.advantages, self.returns = None, None
+    def __init__(self, max_size: int = 10000):
+        self.max_size = max_size
+        self.reset()
 
-    def add(self, obs, action, reward, value, log_prob, done, action_mask, tree_structure):
-        self.observations.append(obs); self.actions.append(action); self.rewards.append(reward)
-        self.values.append(value); self.log_probs.append(log_prob); self.dones.append(done)
+    def reset(self):
+        self.observations: list = []
+        self.actions: list = []
+        self.rewards: list = []
+        self.values: list = []
+        self.log_probs: list = []
+        self.dones: list = []
+        self.action_masks: list = []
+        self.tree_structures: List[Optional[Dict[int,List[int]]]] = []
+        self.advantages: Optional[np.ndarray] = None # Keep as Optional np.ndarray
+        self.returns: Optional[np.ndarray] = None    # Keep as Optional np.ndarray
+        self.ptr: int = 0 # For deque-like behavior with lists, though not fully implemented here yet.
+                          # For simple list pop(0), ptr is not strictly needed but good for future deque.
+
+    def add(self, obs: Any, action: Any, reward: float, value: float, log_prob: float, done: bool, action_mask: Any, tree_structure: Optional[Dict[int,List[int]]]):
+        if len(self.observations) == self.max_size:
+            # Remove oldest entries (FIFO)
+            self.observations.pop(0)
+            self.actions.pop(0)
+            self.rewards.pop(0)
+            self.values.pop(0)
+            self.log_probs.pop(0)
+            self.dones.pop(0)
+            self.action_masks.pop(0)
+            self.tree_structures.pop(0)
+
+        self.observations.append(obs)
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.values.append(value)
+        self.log_probs.append(log_prob)
+        self.dones.append(done)
         self.action_masks.append(action_mask)
-        self.tree_structures.append(tree_structure) # Store it
+        self.tree_structures.append(tree_structure)
 
     def compute_returns_and_advantages(self, policy: HypothesisNet, gamma: float, gae_lambda: float,
                                        task_trajectories: Optional[torch.Tensor] = None):
+        # Ensure buffer is not empty before proceeding
+        if not self.observations:
+            self.advantages = np.array([], dtype=np.float32)
+            self.returns = np.array([], dtype=np.float32)
+            return
+
         rewards = np.array(self.rewards, dtype=np.float32)
         values = np.array(self.values, dtype=np.float32)
         dones = np.array(self.dones, dtype=np.float32)
 
-        last_obs_np = np.array(self.observations[-1])
+        last_obs_np = np.array(self.observations[-1]) # Error if observations is empty
         last_obs = torch.FloatTensor(last_obs_np).unsqueeze(0)
-        last_action_mask_np = np.array(self.action_masks[-1])
+        last_action_mask_np = np.array(self.action_masks[-1]) # Error if action_masks is empty
         last_action_mask = torch.BoolTensor(last_action_mask_np).unsqueeze(0)
         last_tree_structure = self.tree_structures[-1]
 

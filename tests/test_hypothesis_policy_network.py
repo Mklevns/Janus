@@ -7,7 +7,7 @@ import os
 # Ensure the package root is in the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from hypothesis_policy_network import HypothesisNet # noqa: E402
+from hypothesis_policy_network import HypothesisNet, RolloutBuffer # noqa: E402
 # from progressive_grammar_system import ProgressiveGrammar # Mock if needed, or ensure None is handled
 
 # A simple mock for ProgressiveGrammar if its full import is problematic or complex
@@ -191,6 +191,70 @@ class TestHypothesisNetMetaLearning(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Observation dimension must be a multiple of node_feature_dim."):
             policy(invalid_observation, self.action_mask)
+
+
+class TestRolloutBuffer(unittest.TestCase):
+    def test_buffer_capacity(self):
+        max_size = 3
+        buffer = RolloutBuffer(max_size=max_size)
+
+        for i in range(max_size + 2): # Add 5 items
+            buffer.add(
+                obs=float(i), action=i, reward=float(i), value=float(i),
+                log_prob=float(i), done=(i % 2 == 0), action_mask=True, tree_structure=None
+            )
+
+        self.assertEqual(len(buffer.observations), max_size)
+        self.assertEqual(len(buffer.actions), max_size)
+        self.assertEqual(len(buffer.rewards), max_size)
+        self.assertEqual(len(buffer.values), max_size)
+        self.assertEqual(len(buffer.log_probs), max_size)
+        self.assertEqual(len(buffer.dones), max_size)
+        self.assertEqual(len(buffer.action_masks), max_size)
+        self.assertEqual(len(buffer.tree_structures), max_size)
+
+    def test_fifo_eviction(self):
+        max_size = 3
+        buffer = RolloutBuffer(max_size=max_size)
+
+        # Store observations that are easy to track, e.g., their own index
+        observations_to_add = [float(i) for i in range(5)] # 0.0, 1.0, 2.0, 3.0, 4.0
+        actions_to_add = [i for i in range(5)]
+
+        for i in range(5):
+            buffer.add(
+                obs=observations_to_add[i],
+                action=actions_to_add[i],
+                reward=float(i), value=float(i), log_prob=float(i),
+                done=(i % 2 == 0), action_mask=True, tree_structure=None
+            )
+
+        # After adding 5 items to a buffer of size 3,
+        # we expect items with original indices 2, 3, 4 to remain.
+        expected_observations = observations_to_add[2:] # [2.0, 3.0, 4.0]
+        expected_actions = actions_to_add[2:]       # [2, 3, 4]
+
+        self.assertEqual(buffer.observations, expected_observations)
+        self.assertEqual(buffer.actions, expected_actions)
+
+        # Spot check another list, e.g. rewards
+        expected_rewards = [float(i) for i in range(2, 5)] # rewards for items 2, 3, 4
+        self.assertEqual(buffer.rewards, expected_rewards)
+
+    def test_buffer_reset(self):
+        buffer = RolloutBuffer(max_size=3)
+        for i in range(2): # Add some items
+            buffer.add(float(i), i, float(i), float(i), float(i), False, True, None)
+
+        self.assertEqual(len(buffer.observations), 2)
+        buffer.reset()
+        self.assertEqual(len(buffer.observations), 0)
+        self.assertEqual(len(buffer.actions), 0)
+        # self.advantages and self.returns should also be None after reset
+        self.assertIsNone(buffer.advantages)
+        self.assertIsNone(buffer.returns)
+        self.assertEqual(buffer.max_size, 3) # max_size should persist
+
 
 if __name__ == '__main__':
     # This allows running the tests from the command line

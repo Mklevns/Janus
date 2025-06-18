@@ -846,7 +846,7 @@ def test_evaluate_expression_handles_invalid_predictions_and_exceptions(env_setu
         f"Reward for incomplete (empty root) expression is incorrect. Expected {expected_reward_incomplete}, got {reward_incomplete}"
 
     # --- Test Case 8: Incomplete expression (operator with missing child) ---
-    env.current_state = TreeState(max_depth=env.max_depth)
+    env.current_state = TreeState(max_depth=env.max_depth) # Ensure it's a fresh state for this sub-test
     root_incomplete_op = ExpressionNode(NodeType.OPERATOR, '+', depth=0)
     var_child_incomplete = ExpressionNode(NodeType.VARIABLE, x_var, parent=root_incomplete_op, depth=1)
     root_incomplete_op.children.append(var_child_incomplete) # Only one child for binary op '+'
@@ -858,3 +858,127 @@ def test_evaluate_expression_handles_invalid_predictions_and_exceptions(env_setu
     reward_incomplete_op_eval = env._evaluate_expression()
     assert np.isclose(reward_incomplete_op_eval, expected_reward_incomplete), \
         f"Reward for incomplete (operator missing child) expression is incorrect. Expected {expected_reward_incomplete}, got {reward_incomplete_op_eval}"
+
+
+# Ensure logging is available for caplog fixture
+import logging
+from unittest.mock import patch, MagicMock
+
+@pytest.fixture
+def env_for_reset_test():
+    grammar = MockGrammar() # Use the simple MockGrammar from above
+    variables = [Variable(name="v0", index=0, properties={})]
+    target_data = np.array([[1.0, 2.0],[2.0, 3.0]])
+    env = SymbolicDiscoveryEnv(
+        grammar=grammar,
+        target_data=target_data,
+        variables=variables,
+        max_nodes=5 # Smaller max_nodes for easier testing of obs shape
+    )
+    return env
+
+class TestSymbolicDiscoveryEnvReset:
+
+    def test_successful_reset(self, env_for_reset_test):
+        env = env_for_reset_test
+        obs, info = env.reset()
+
+        assert isinstance(obs, np.ndarray), "Observation should be a numpy array"
+        assert obs.shape == env.observation_space.shape, "Observation shape mismatch"
+        assert isinstance(info, dict), "Info should be a dictionary"
+        assert not info.get("reset_failed", False), "Reset should not indicate failure"
+
+    def test_reset_with_uninitialized_grammar(self, env_for_reset_test, caplog):
+        env = env_for_reset_test
+        env.grammar = MagicMock(spec=ProgressiveGrammar) # Mock it
+        # Simulate uninitialized primitives
+        # Option 1: grammar is None (though __init__ type hint is Any, it expects ProgressiveGrammar compatible)
+        # env.grammar = None # This would likely cause AttributeError earlier if not checked.
+        # Option 2: grammar.primitives is missing
+        del env.grammar.primitives
+        # Option 3: grammar.primitives is empty
+        # env.grammar.primitives = {}
+
+        with caplog.at_level(logging.ERROR):
+            obs, info = env.reset()
+
+        assert isinstance(obs, np.ndarray), "Default observation should be a numpy array"
+        assert obs.shape == env.observation_space.shape, "Default observation shape mismatch"
+        assert np.all(obs == 0), "Default observation should be zeros"
+        assert isinstance(info, dict), "Default info should be a dictionary"
+        assert info.get("reset_failed", False) is True, "Reset should indicate failure"
+        assert "Grammar not properly initialized" in caplog.text
+
+    def test_reset_with_get_observation_returns_none(self, env_for_reset_test, caplog):
+        env = env_for_reset_test
+        with patch.object(env, '_get_observation', return_value=None):
+            with caplog.at_level(logging.ERROR):
+                obs, info = env.reset()
+
+        assert isinstance(obs, np.ndarray)
+        assert obs.shape == env.observation_space.shape
+        assert np.all(obs == 0)
+        assert info.get("reset_failed", True)
+        assert "Generated initial observation is None" in caplog.text
+
+    def test_reset_with_get_observation_wrong_shape_no_reshape(self, env_for_reset_test, caplog):
+        env = env_for_reset_test
+        wrong_shape_obs = np.array([1, 2, 3], dtype=np.float32) # Clearly wrong shape and size
+
+        with patch.object(env, '_get_observation', return_value=wrong_shape_obs):
+            with caplog.at_level(logging.ERROR):
+                obs, info = env.reset()
+
+        assert isinstance(obs, np.ndarray)
+        assert obs.shape == env.observation_space.shape
+        assert np.all(obs == 0)
+        assert info.get("reset_failed", True)
+        assert "Initial observation shape/type mismatch" in caplog.text
+        assert "incompatible with expected" in caplog.text # From the more specific error message
+
+    def test_reset_with_get_observation_wrong_shape_can_reshape(self, env_for_reset_test, caplog):
+        env = env_for_reset_test
+        # Correct total size, but wrong shape (e.g., flattened version)
+        correct_total_size = np.prod(env.observation_space.shape)
+        obs_flattened = np.arange(correct_total_size, dtype=np.float32) # Shape (N,)
+
+        with patch.object(env, '_get_observation', return_value=obs_flattened):
+            with caplog.at_level(logging.WARNING): # Reshape attempt logs a warning
+                obs, info = env.reset()
+
+        assert isinstance(obs, np.ndarray)
+        assert obs.shape == env.observation_space.shape # Should be reshaped
+        assert np.array_equal(obs, obs_flattened.reshape(env.observation_space.shape))
+        assert not info.get("reset_failed", False)
+        assert "Successfully reshaped observation" in caplog.text
+
+    def test_reset_with_get_observation_wrong_shape_cannot_reshape(self, env_for_reset_test, caplog):
+        env = env_for_reset_test
+        # Correct total size, but wrong shape that cannot be broadcast by reshape (e.g. add extra dim)
+        correct_total_size = np.prod(env.observation_space.shape)
+        obs_wrong_dim = np.arange(correct_total_size, dtype=np.float32).reshape(1, correct_total_size)
+        # This specific reshape error check might be tricky if the target shape is 1D already.
+        # Let's make a shape that is guaranteed to fail reshaping if the target is not (1, N)
+        # Default obs space shape is (max_nodes * 128,). Let's make obs_wrong_dim (max_nodes, 128)
+        # if max_nodes * 128 is the total size.
+
+        if len(env.observation_space.shape) == 1: # e.g. (640,)
+            if env.max_nodes * 128 == correct_total_size : # Check if it's the default structure
+                 obs_bad_reshape = np.arange(correct_total_size, dtype=np.float32).reshape(env.max_nodes, 128)
+            else: # Cannot make a meaningful bad reshape for this test case, skip or adapt
+                pytest.skip("Cannot construct a meaningful bad-reshapable obs for this obs space dynamically yet.")
+                return
+        else: # If obs space is already multi-dimensional
+            obs_bad_reshape = np.arange(correct_total_size, dtype=np.float32).reshape(1, correct_total_size)
+
+
+        with patch.object(env, '_get_observation', return_value=obs_bad_reshape):
+            with caplog.at_level(logging.ERROR):
+                obs, info = env.reset()
+
+        assert isinstance(obs, np.ndarray)
+        assert obs.shape == env.observation_space.shape # Should be default zeros
+        assert np.all(obs == 0)
+        assert info.get("reset_failed", True)
+        assert "Initial observation shape/type mismatch" in caplog.text
+        assert "incompatible (cannot reshape)" in caplog.text # Check for the reshape failure message

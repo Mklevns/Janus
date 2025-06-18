@@ -10,6 +10,253 @@ from progressive_grammar_system import Variable, Expression
 from physics_discovery_extensions import SymbolicRegressor
 from integrated_pipeline import JanusConfig, SyntheticDataParamsConfig, RewardConfig
 
+# For testing validate_imports
+from experiment_runner import validate_imports, REQUIRED_MODULES
+from custom_exceptions import MissingDependencyError
+import importlib # To get the original import_module for some tests
+
+
+# Store the original import_module to be able to use it in tests if needed
+# And to ensure we can restore it if patching affects other tests (though pytest handles this)
+original_import_module = importlib.import_module
+
+
+class TestValidateImports:
+    def test_successful_import(self):
+        mock_globals = {}
+        test_modules = {
+            "numpy": "np",
+            "typing": ["Dict", "List"],
+            "json": None # Direct import
+        }
+
+        # Mock import_module behavior
+        def mock_import(name):
+            mocked_module = MagicMock()
+            mocked_module.Dict = dict # Simulate Dict object
+            mocked_module.List = list # Simulate List object
+            if name == "json":
+                 return importlib.import_module("json") # Use real json for simplicity
+            return mocked_module
+
+        with patch('importlib.import_module', side_effect=mock_import) as mock_importer:
+            validate_imports(test_modules, mock_globals, scope="global")
+
+            assert "np" in mock_globals
+            assert "Dict" in mock_globals
+            assert "List" in mock_globals
+            assert "json" in mock_globals
+            assert mock_globals["Dict"] == dict
+            mock_importer.assert_any_call("numpy")
+            mock_importer.assert_any_call("typing")
+            mock_importer.assert_any_call("json")
+
+    def test_missing_required_module(self):
+        mock_globals = {}
+        test_modules = {"non_existent_module": None}
+
+        with patch('importlib.import_module', side_effect=ImportError("Module not found!")):
+            with pytest.raises(MissingDependencyError, match="Module 'non_existent_module' could not be imported"):
+                validate_imports(test_modules, mock_globals, scope="global")
+
+    def test_missing_specific_import(self):
+        mock_globals = {}
+        test_modules = {"typing": ["NonExistentObject"]}
+
+        mock_typing_module = MagicMock()
+        # Make getattr raise AttributeError when NonExistentObject is accessed
+        def mock_getattr(module, name):
+            if name == "NonExistentObject":
+                raise AttributeError(f"Mock module has no attribute {name}")
+            return getattr(module, name) # Default behavior for other attributes if any
+
+        mock_typing_module.configure_mock(**{'__getattr__': mock_getattr})
+
+
+        with patch('importlib.import_module', return_value=mock_typing_module) as mock_importer:
+            with pytest.raises(MissingDependencyError, match="Object 'NonExistentObject' not found in module 'typing'"):
+                validate_imports(test_modules, mock_globals, scope="global")
+            mock_importer.assert_called_with("typing")
+
+
+    def test_optional_module_missing(self, caplog): # Use caplog to check warnings
+        mock_globals = {}
+        # Use a module from the actual REQUIRED_MODULES that is optional
+        # Example: emergent_monitor
+        test_modules = {
+            "emergent_monitor": REQUIRED_MODULES["emergent_monitor"] # Get details from main config
+        }
+
+        original_logging_level = logging.getLogger().getEffectiveLevel()
+        logging.getLogger().setLevel(logging.WARNING) # Ensure warnings are captured
+
+        with patch('importlib.import_module', side_effect=ImportError("No module named emergent_monitor")):
+            validate_imports(test_modules, mock_globals, scope="global")
+            # Check that no error was raised
+            assert "EmergentBehaviorTracker" in mock_globals # Dummy should be created
+            assert "_EMERGENT_MONITOR_AVAILABLE" in mock_globals
+            assert not mock_globals["_EMERGENT_MONITOR_AVAILABLE"]
+
+            # Check for specific warning log
+            assert "Optional module EmergentBehaviorTracker (emergent_monitor) not found." in caplog.text
+            assert "Defining dummy." in caplog.text
+
+        logging.getLogger().setLevel(original_logging_level) # Restore original logging level
+
+
+    def test_local_scope_module_availability_check(self, caplog):
+        mock_globals = {}
+        # Example of a local module from REQUIRED_MODULES
+        test_modules = {
+             "symbolic_discovery_env": REQUIRED_MODULES["symbolic_discovery_env"]
+        }
+
+        # Mock import_module to succeed for this "local" module
+        mock_sde_module = MagicMock()
+        with patch('importlib.import_module', return_value=mock_sde_module) as mock_importer:
+            validate_imports(test_modules, mock_globals, scope="global") # Global scope validation
+
+            # Module should NOT be in globals
+            assert "SymbolicDiscoveryEnv" not in mock_globals
+            assert "symbolic_discovery_env" not in mock_globals
+            # But importlib.import_module should have been called to check availability
+            mock_importer.assert_called_with(REQUIRED_MODULES["symbolic_discovery_env"]["module_name"])
+            assert "Checked availability of local module" in caplog.text
+
+
+class TestExperimentRunnerParallel:
+    @pytest.fixture
+    def mock_experiment_config(self):
+        # Mock JanusConfig and other dependencies if ExperimentConfig requires them
+        mock_janus_cfg = MagicMock(spec=JanusConfig)
+        mock_janus_cfg.num_evaluation_cycles = 1 # Keep it simple
+        mock_janus_cfg.synthetic_data_params = None
+        mock_janus_cfg.target_phenomena = "test_phenomena"
+
+        return ExperimentConfig(
+            name="test_exp",
+            experiment_type="test_type",
+            janus_config=mock_janus_cfg,
+            environment_type="test_env",
+            algorithm="test_algo",
+            noise_level=0.0,
+            n_runs=2 # Test with 2 runs
+        )
+
+    @pytest.fixture
+    def runner(self):
+        # Minimal ExperimentRunner for testing run_experiment_suite logic
+        # Patching _discover_experiments and _register_algorithms to avoid actual plugin/algo loading
+        with patch('experiment_runner.ExperimentRunner._discover_experiments', return_value=None):
+            with patch('experiment_runner.ExperimentRunner._register_algorithms', return_value=None):
+                runner = experiment_runner.ExperimentRunner(use_wandb=False, strict_mode=False)
+                # Mock essential components if run_single_experiment is not fully mocked
+                runner.experiment_plugins['test_type'] = MagicMock()
+                return runner
+
+    @patch('experiment_runner.mp.Pool')
+    @patch('experiment_runner.Manager') # Patch where Manager is used (experiment_runner.Manager)
+    @patch('experiment_runner.ExperimentRunner._save_result') # Mock saving results
+    def test_run_experiment_suite_parallel_execution(self, mock_save_result, MockManager, MockPool, runner, mock_experiment_config, caplog):
+        # Setup mocks for Pool and Queue
+        mock_pool_instance = MockPool.return_value.__enter__.return_value # Allows 'with Pool(...) as pool:'
+        mock_queue_instance = MockManager.return_value.Queue.return_value
+
+        # Mock run_single_experiment to simulate work and put result on queue via callback
+        mock_result = MagicMock(spec=experiment_runner.ExperimentResult)
+        mock_result.config = mock_experiment_config # Attach config for _save_result
+        mock_result.run_id = 0
+
+        # This simulates the callback part of apply_async
+        def side_effect_apply_async(target, args, callback, error_callback):
+            # Simulate successful execution by calling the callback
+            # In real scenario, this happens in worker process after target returns
+            callback(mock_result) # For first call
+            callback(mock_result) # For second call (n_runs=2)
+            async_res = MagicMock()
+            async_res.get.return_value = mock_result # Not strictly needed if callback handles all
+            return async_res
+
+        mock_pool_instance.apply_async.side_effect = side_effect_apply_async
+
+        # Mock queue.get to return results
+        # Total 2 runs for mock_experiment_config
+        mock_queue_instance.get.side_effect = [mock_result, mock_result, mp.TimeoutError("Simulated timeout after all results")]
+
+
+        runner.run_experiment_suite([mock_experiment_config], parallel=True, num_parallel_workers=2)
+
+        MockPool.assert_called_once_with(processes=2)
+        MockManager.assert_called_once()
+        MockManager.return_value.Queue.assert_called_once()
+
+        assert mock_pool_instance.apply_async.call_count == mock_experiment_config.n_runs
+        # Check if run_single_experiment was the target
+        first_call_args = mock_pool_instance.apply_async.call_args_list[0][1] # args tuple of first call
+        assert first_call_args['target'] == runner.run_single_experiment
+
+        # Results should be collected from the queue
+        assert len(runner._results_to_dataframe([])) == 0 # Placeholder, check based on all_results
+        # The test needs to check all_results populated inside run_experiment_suite
+        # This part is tricky as all_results is local. We check by side effects like _save_result calls.
+        assert mock_save_result.call_count == mock_experiment_config.n_runs
+
+        # Check logging for parallel execution start
+        assert "Running experiment suite in parallel" in caplog.text
+
+
+    @patch('experiment_runner.ExperimentRunner.run_single_experiment')
+    @patch('experiment_runner.ExperimentRunner._save_result')
+    def test_run_experiment_suite_sequential_execution(self, mock_save_result, mock_run_single, runner, mock_experiment_config, caplog):
+        mock_result = MagicMock(spec=experiment_runner.ExperimentResult)
+        mock_run_single.return_value = mock_result
+
+        runner.run_experiment_suite([mock_experiment_config], parallel=False)
+
+        assert mock_run_single.call_count == mock_experiment_config.n_runs
+        assert mock_save_result.call_count == mock_experiment_config.n_runs
+        assert "Running experiment suite sequentially" in caplog.text
+
+
+    @patch('experiment_runner.mp.Pool')
+    @patch('experiment_runner.Manager')
+    @patch('experiment_runner._mp_error_callback') # Patch the actual error callback function
+    def test_run_experiment_suite_parallel_error_callback(self, mock_error_callback, MockManager, MockPool, runner, mock_experiment_config, caplog):
+        mock_pool_instance = MockPool.return_value.__enter__.return_value
+        MockManager.return_value.Queue.return_value # Just need the queue mock
+
+        simulated_exception = ValueError("Simulated error in worker")
+
+        def side_effect_apply_async_error(target, args, callback, error_callback):
+            # Simulate error by calling the error_callback
+            error_callback(simulated_exception) # For all calls
+            async_res = MagicMock()
+            # async_res.get.side_effect = simulated_exception # If get() was used to fetch results
+            return async_res
+
+        mock_pool_instance.apply_async.side_effect = side_effect_apply_async_error
+
+        # Mock queue.get to simulate no results due to errors or timeout to finish loop
+        mock_queue_instance = MockManager.return_value.Queue.return_value
+        mock_queue_instance.get.side_effect = mp.TimeoutError("Simulated timeout")
+
+
+        runner.run_experiment_suite([mock_experiment_config], parallel=True, num_parallel_workers=1)
+
+        # Error callback should be triggered for each task
+        assert mock_error_callback.call_count == mock_experiment_config.n_runs
+        mock_error_callback.assert_any_call(simulated_exception)
+
+        # Check logs for warnings about result mismatch if that's implemented
+        # Or check that the final dataframe is empty or reflects missing results
+        # For now, just ensuring error_callback is hit.
+        assert "Error in multiprocessing worker" not in caplog.text # Because we mocked _mp_error_callback itself
+                                                                   # If we wanted to check its logging, we'd let original run.
+
+
+# Need to import mp for the TimeoutError in the test
+import multiprocessing as mp
+import experiment_runner # for ExperimentRunner class and ExperimentResult
 
 class TestPhysicsDiscoveryExperimentVariableMapping:
 

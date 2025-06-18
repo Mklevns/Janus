@@ -6,53 +6,187 @@ Comprehensive framework for running, tracking, and analyzing physics discovery e
 Supports all phases of the validation protocol with proper statistical rigor.
 """
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from typing import Dict, List, Tuple, Optional, Any, Callable
-from dataclasses import dataclass, field, asdict
-import json
-import pickle
-from pathlib import Path
-import time
-from datetime import datetime
-import sympy as sp
-from scipy.integrate import odeint
-import torch
-import wandb
-from tqdm import tqdm
-import hashlib
-import abc
+import importlib
+import sys
 import logging
-import importlib.metadata
-import sys # For sys.exit
 
-from custom_exceptions import MissingDependencyError, PluginNotFoundError, InvalidConfigError, DataGenerationError
-from base_experiment import BaseExperiment
-from math_utils import calculate_symbolic_accuracy
-from robust_hypothesis_extraction import HypothesisTracker, JanusTrainingIntegration
-from conservation_reward_fix import ConservationBiasedReward
-from symmetry_detection_fix import PhysicsSymmetryDetector
-from live_monitor import TrainingLogger, LiveMonitor
-# Attempt to import EmergentBehaviorTracker, handle if not found
-try:
-    from emergent_monitor import EmergentBehaviorTracker
-    _EMERGENT_MONITOR_AVAILABLE = True
-except ImportError:
-    _EMERGENT_MONITOR_AVAILABLE = False
-    logging.warning("EmergentBehaviorTracker not found in emergent_monitor. Phase transition tracking will be disabled.")
-    # Define a dummy class if not available to prevent errors during initialization
-    class EmergentBehaviorTracker:
-        def __init__(self, *args, **kwargs):
-            logging.warning("Using dummy EmergentBehaviorTracker as the real one is not available.")
-            self.phase_detector = type('DummyPhaseDetector', (object,), {'phase_transitions': []})()
-        def log_discovery(self, *args, **kwargs): pass
+# Setup basic logging for import validation
+logging.basicConfig(level=logging.INFO)
 
-from sympy import lambdify, symbols
-from progressive_grammar_system import Expression as SymbolicExpression
-from config_models import JanusConfig, SyntheticDataParamsConfig
-from pydantic import BaseModel
+REQUIRED_MODULES = {
+    "numpy": "np",
+    "pandas": "pd",
+    "matplotlib.pyplot": "plt",
+    "seaborn": "sns",
+    "typing": ["Dict", "List", "Tuple", "Optional", "Any", "Callable"],
+    "dataclasses": ["dataclass", "field", "asdict"],
+    "json": None,
+    "pickle": None,
+    "pathlib": ["Path"],
+    "time": None,
+    "datetime": ["datetime"],
+    "sympy": "sp",
+    "scipy.integrate": ["odeint"],
+    "torch": None,
+    "wandb": None,
+    "tqdm": ["tqdm"],
+    "hashlib": None,
+    "abc": None,
+    "importlib.metadata": None,
+    "custom_exceptions": ["MissingDependencyError", "PluginNotFoundError", "InvalidConfigError", "DataGenerationError"],
+    "base_experiment": ["BaseExperiment"],
+    "math_utils": ["calculate_symbolic_accuracy"],
+    "robust_hypothesis_extraction": ["HypothesisTracker", "JanusTrainingIntegration"],
+    "conservation_reward_fix": ["ConservationBiasedReward"],
+    "symmetry_detection_fix": ["PhysicsSymmetryDetector"],
+    "live_monitor": ["TrainingLogger", "LiveMonitor"],
+    "emergent_monitor": {"module_name": "emergent_monitor", "specific_imports": "EmergentBehaviorTracker", "optional": True},
+    "sympy.core.symbol": {"module_name": "sympy", "specific_imports": "symbols", "optional": False},
+    "sympy.utilities.lambdify": {"module_name": "sympy", "specific_imports": "lambdify", "optional": False},
+    "progressive_grammar_system": {"module_name": "progressive_grammar_system", "specific_imports": "Expression", "as_name": "SymbolicExpression", "optional": False},
+    "config_models": ["JanusConfig", "SyntheticDataParamsConfig"],
+    "pydantic": ["BaseModel"],
+    "os": {"optional": True, "scope": "local"}, # For os.getenv
+    "multiprocessing": [
+        {"module_name": "multiprocessing", "specific_imports": "Manager", "optional": True, "scope": "local"}, # Local as it's used in one method
+        {"module_name": "multiprocessing", "as_name": "mp", "optional": True, "scope": "local"} # Local as it's used in one method
+    ],
+    # Modules imported within functions/methods - ensure they are also checked or handled appropriately
+    # These are marked as 'local' and won't be imported into global scope by default by validate_imports
+    "symbolic_discovery_env": {"module_name": "symbolic_discovery_env", "specific_imports": "SymbolicDiscoveryEnv", "optional": False, "scope": "local"},
+    "hypothesis_policy_network": {"module_name": "hypothesis_policy_network", "specific_imports": ["HypothesisNet", "PPOTrainer"], "optional": False, "scope": "local"},
+    "progressive_grammar_system.progressive_grammar": {"module_name": "progressive_grammar_system.progressive_grammar", "specific_imports": "ProgressiveGrammar", "optional": False, "scope": "local"},
+    "physics_discovery_extensions": {"module_name": "physics_discovery_extensions", "specific_imports": "SymbolicRegressor", "optional": False, "scope": "local"},
+    "progressive_grammar_system.variable": {"module_name": "progressive_grammar_system.variable", "specific_imports": "Variable", "optional": False, "scope": "local"}
+}
+
+# Placeholder for _EMERGENT_MONITOR_AVAILABLE, will be set by validate_imports
+_EMERGENT_MONITOR_AVAILABLE = False
+
+def validate_imports(required_modules: dict, current_globals: dict, scope: str = "global"):
+    """
+    Validates the presence of required modules and imports them into the provided globals dict.
+    Allows for optional modules and specific object imports.
+    Modules marked with scope 'local' are checked for availability but not imported globally.
+    """
+    global _EMERGENT_MONITOR_AVAILABLE # Allow modification of global flag
+
+    for module_key, import_details in required_modules.items():
+        is_optional = False
+        # actual_module_name is the name used for importlib.import_module()
+        # module_key is the dictionary key, which might be different for aliased specific imports (e.g. sympy.core.symbol for symbols)
+        actual_module_name = module_key
+        specific_imports = None
+        as_name = None
+        module_scope = "global"
+
+        if isinstance(import_details, dict):
+            actual_module_name = import_details.get("module_name", module_key)
+            is_optional = import_details.get("optional", False)
+            # specific_imports can be a string or a list of strings
+            specific_imports_val = import_details.get("specific_imports")
+            if isinstance(specific_imports_val, str):
+                specific_imports = [specific_imports_val]
+            elif isinstance(specific_imports_val, list):
+                specific_imports = specific_imports_val
+
+            as_name = import_details.get("as_name")
+            module_scope = import_details.get("scope", "global")
+        elif isinstance(import_details, list):
+            specific_imports = import_details
+        elif isinstance(import_details, str): # This is for alias like "numpy": "np"
+            as_name = import_details
+
+        # Scope filtering
+        if scope == "local_init" and module_scope == "global":
+            pass # Proceed to import global modules needed for local_init
+        elif scope == "global" and module_scope == "local":
+            logging.debug(f"Skipping local module {actual_module_name} (key: {module_key}) in global validation pass.")
+            continue
+        elif scope == "runtime_local" and module_scope != "local":
+             # This scope is for when a local function needs to ensure a 'local' module is available.
+             # It shouldn't try to re-import global modules.
+            continue
+
+
+        try:
+            module = importlib.import_module(actual_module_name)
+
+            if module_scope == "global" or (scope == "local_init" and module_scope == "global"):
+                if as_name and not specific_imports: # e.g. "numpy": "np"
+                    current_globals[as_name] = module
+                # If specific_imports are listed, only they are added to globals.
+                # If no specific_imports and no as_name, the module itself is added with its own name.
+                elif not specific_imports and not as_name:
+                     current_globals[actual_module_name.split('.')[-1]] = module
+
+
+                if specific_imports:
+                    for item_name in specific_imports:
+                        item = getattr(module, item_name)
+                        # If there's an 'as_name' at the top level of an entry for a *single specific import*, use it.
+                        # e.g. "progressive_grammar_system": {"module_name": ..., "specific_imports": "Expression", "as_name": "SymbolicExpression"}
+                        item_final_name = as_name if as_name and len(specific_imports) == 1 else item_name
+                        current_globals[item_final_name] = item
+
+                logging.info(f"Successfully imported '{actual_module_name}' (key: {module_key})" + (f" as '{as_name}'" if as_name and not specific_imports else "") + (f" with objects {specific_imports}" if specific_imports else ""))
+
+                if actual_module_name == "emergent_monitor" and "EmergentBehaviorTracker" in current_globals:
+                    _EMERGENT_MONITOR_AVAILABLE = True
+
+            elif module_scope == "local" and (scope == "global" or scope == "runtime_local"):
+                 # For 'global' scope pass, just check availability of local modules
+                 # For 'runtime_local' scope pass, this confirms module is importable before a direct import call in code
+                 logging.info(f"Checked availability of local module '{actual_module_name}' (key: {module_key}). It should be imported directly where needed.")
+
+
+        except ImportError as e:
+            err_msg = f"Module '{actual_module_name}' (key: {module_key}) could not be imported. Error: {e}"
+            if is_optional:
+                logging.warning(err_msg)
+                if module_key == "emergent_monitor": # Use module_key for consistent checking
+                    _EMERGENT_MONITOR_AVAILABLE = False
+                    logging.warning("Optional module EmergentBehaviorTracker (emergent_monitor) not found. Phase transition tracking will be disabled. Defining dummy.")
+                    class EmergentBehaviorTracker:
+                        def __init__(self, *args, **kwargs):
+                            logging.warning("Using dummy EmergentBehaviorTracker as the real one is not available.")
+                            self.phase_detector = type('DummyPhaseDetector', (object,), {'phase_transitions': []})()
+                        def log_discovery(self, *args, **kwargs): pass
+                    current_globals['EmergentBehaviorTracker'] = EmergentBehaviorTracker
+                    current_globals['_EMERGENT_MONITOR_AVAILABLE'] = _EMERGENT_MONITOR_AVAILABLE
+            else:
+                logging.error(err_msg)
+                # Re-raise as MissingDependencyError or allow sys.exit if critical
+                # For now, let's use a custom exception for clarity.
+                raise MissingDependencyError(err_msg) from e
+        except AttributeError as e:
+            err_msg = f"Object not found during import of '{actual_module_name}' (key: {module_key}). Error: {e}"
+            if is_optional: logging.warning(err_msg)
+            else: logging.error(err_msg); raise MissingDependencyError(err_msg) from e
+        except Exception as e:
+            err_msg = f"An unexpected error occurred while importing '{actual_module_name}' (key: {module_key}). Error: {e}"
+            if is_optional: logging.warning(err_msg)
+            else: logging.error(err_msg); raise MissingDependencyError(err_msg) from e
+
+# Initial validation call for global scope modules, updating the script's global namespace
+validate_imports(REQUIRED_MODULES, globals(), scope="global")
+
+# Old explicit import statements have been removed.
+# The validate_imports function now handles the loading of these modules
+# based on the REQUIRED_MODULES dictionary.
+
+# The try-except block for EmergentBehaviorTracker is effectively handled by
+# the 'optional' flag and logic within validate_imports.
+# If emergent_monitor fails to import and is optional, a dummy EmergentBehaviorTracker
+# and _EMERGENT_MONITOR_AVAILABLE = False will be set by validate_imports.
+
+# Similarly, specific imports like 'from sympy import lambdify, symbols' are
+# handled by their definitions in REQUIRED_MODULES.
+
+# Helper function for multiprocessing error callback
+def _mp_error_callback(error):
+    # It's better to log the full traceback
+    logging.error(f"Error in multiprocessing worker: {error}", exc_info=True)
 
 
 @dataclass
@@ -264,6 +398,7 @@ class ExperimentRunner:
                  base_dir: str = "./experiments",
                  use_wandb: bool = True,
                  strict_mode: bool = False): # Added strict_mode
+        validate_imports(REQUIRED_MODULES, globals(), scope="local_init")
         self.base_dir = Path(base_dir); self.base_dir.mkdir(exist_ok=True)
         self.use_wandb = use_wandb
         self.strict_mode = strict_mode # Store strict_mode
@@ -299,9 +434,14 @@ class ExperimentRunner:
         else: logging.info(f"Loaded plugins: {list(self.experiment_plugins.keys())}")
 
     def _register_algorithms(self):
+        # Perform a runtime check for local-scope dependencies.
+        # The actual imports will still be done by the 'from ... import ...' lines below.
+        validate_imports(REQUIRED_MODULES, globals(), scope="runtime_local")
+
         from symbolic_discovery_env import SymbolicDiscoveryEnv
         from hypothesis_policy_network import HypothesisNet, PPOTrainer
-        from progressive_grammar_system import ProgressiveGrammar
+        # Assuming ProgressiveGrammar is from progressive_grammar_system.progressive_grammar based on REQUIRED_MODULES
+        from progressive_grammar_system.progressive_grammar import ProgressiveGrammar
         from physics_discovery_extensions import SymbolicRegressor
         def create_janus_full(env_data: np.ndarray, variables: List[Any], exp_config: ExperimentConfig) -> PPOTrainer:
             grammar = ProgressiveGrammar(); janus_cfg = exp_config.janus_config
@@ -356,14 +496,96 @@ class ExperimentRunner:
     # _run_janus_experiment and _run_genetic_experiment are legacy helpers, assuming plugins handle their logic.
     # If they were still primary execution paths, they'd need similar JanusConfig integration.
 
-    def run_experiment_suite(self, configs: List[ExperimentConfig], parallel: bool = False) -> pd.DataFrame:
+    def run_experiment_suite(self, configs: List[ExperimentConfig], parallel: bool = False, num_parallel_workers: Optional[int] = None) -> pd.DataFrame:
         all_results: List[ExperimentResult] = []
-        if parallel: logging.warning("Parallel execution not implemented. Running sequentially.")
-        for config_item in tqdm(configs, desc="All Experiment Configs"):
-            for i in range(config_item.n_runs):
-                single_run_result = self.run_single_experiment(config_item, run_id=i)
-                all_results.append(single_run_result)
-                self._save_result(single_run_result)
+
+        if parallel:
+            # Ensure multiprocessing modules are available at runtime
+            validate_imports(REQUIRED_MODULES, globals(), scope="runtime_local")
+            try:
+                import multiprocessing as mp
+                from multiprocessing import Manager
+                # Also ensure tqdm is available if used within parallel part, though it's global here
+            except ImportError:
+                logging.error("Multiprocessing modules not found. Running sequentially.")
+                parallel = False # Fallback to sequential
+
+        if parallel:
+            logging.info(f"Running experiment suite in parallel with up to {num_parallel_workers or mp.cpu_count()} workers.")
+            manager = Manager()
+            results_queue = manager.Queue()
+            async_results: List[mp.pool.AsyncResult] = []
+
+            total_tasks = sum(config_item.n_runs for config_item in configs)
+
+            # Determine number of workers
+            if num_parallel_workers is None:
+                num_parallel_workers = mp.cpu_count()
+            # Ensure num_parallel_workers is at least 1
+            num_parallel_workers = max(1, num_parallel_workers)
+
+
+            with mp.Pool(processes=num_parallel_workers) as pool:
+                for config_item in configs: # Not using tqdm here as tasks are async
+                    for i in range(config_item.n_runs):
+                        # Note: self.run_single_experiment might have issues if 'self' contains unpicklable objects.
+                        # If ExperimentRunner instance itself is not easily picklable, run_single_experiment
+                        # would need to be refactored into a static method or top-level function,
+                        # and all necessary state (like algo_registry, env_registry, plugins) passed explicitly.
+                        # For now, assuming it works or will be addressed if pickling errors occur.
+                        res = pool.apply_async(
+                            self.run_single_experiment,
+                            args=(config_item, i),
+                            callback=lambda result: results_queue.put(result), # Use callback to put into queue
+                            error_callback=_mp_error_callback
+                        )
+                        async_results.append(res)
+
+                logging.info(f"Submitted {len(async_results)} tasks to the pool.")
+
+                # Wait for results with timeout and progress updates
+                # Timeout for each individual get() call on AsyncResult
+                # This is not a global timeout for all results.
+                # A more robust approach might involve a global timeout for the whole collection process.
+                # Or, rely on the queue.get() with timeout.
+
+                pbar = tqdm(total=total_tasks, desc="Processing Experiments")
+                for i in range(total_tasks):
+                    try:
+                        # Get result from queue with a timeout to keep things responsive
+                        # and allow periodic checks or updates.
+                        result = results_queue.get(timeout=300) # 5 minute timeout per result
+                        if result:
+                            all_results.append(result)
+                            self._save_result(result) # Save result as soon as it's available
+                        pbar.update(1)
+                    except mp.TimeoutError: # This is for queue.get timeout, not process timeout
+                        logging.warning(f"Timeout waiting for result from queue (task {i+1}/{total_tasks}). Some tasks might be slow or stuck.")
+                    except Exception as e:
+                        logging.error(f"Exception while getting result for task {i+1}/{total_tasks}: {e}", exc_info=True)
+                        # Decide if to append a placeholder or skip
+                        pbar.update(1) # Still update progress
+                pbar.close()
+
+                pool.close()
+                pool.join()
+
+            logging.info(f"Collected {len(all_results)} results from parallel execution.")
+            if len(all_results) != total_tasks:
+                logging.warning(f"Mismatch in expected ({total_tasks}) and collected ({len(all_results)}) results.")
+
+        else: # Sequential execution
+            logging.info("Running experiment suite sequentially.")
+            for config_item in tqdm(configs, desc="All Experiment Configs"):
+                for i in range(config_item.n_runs):
+                    try:
+                        single_run_result = self.run_single_experiment(config_item, run_id=i)
+                        all_results.append(single_run_result)
+                        self._save_result(single_run_result)
+                    except Exception as e:
+                        logging.error(f"Error running experiment {config_item.name} (run {i}) sequentially: {e}", exc_info=True)
+                        # Optionally append a placeholder error result or skip
+
         results_df = self._results_to_dataframe(all_results)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         results_df.to_csv(self.base_dir / f"all_results_{timestamp}.csv", index=False)
@@ -465,6 +687,17 @@ def run_phase2_robustness(strict_mode_override: bool = False): # Added strict_mo
     return results_df
 
 if __name__ == "__main__":
+    validate_imports(REQUIRED_MODULES, globals(), scope="local_init")
+    # Ensure 'os' is available for os.getenv. It's marked as local in REQUIRED_MODULES.
+    if "os" not in globals(): # Check if 'os' was already imported (e.g. if not truly local)
+        try:
+            import os as _os_main # Import with a temporary alias for this block
+            globals()["os"] = _os_main # Add to globals for os.getenv to find
+            logging.info("Loaded 'os' module for __main__ block.")
+        except ImportError:
+            logging.error("Failed to import 'os' module in __main__ which is required for os.getenv.")
+            # Depending on strictness, might need to sys.exit(1) here if os is critical
+
     logging.basicConfig(level=logging.INFO, format='%(asctime)s-%(levelname)s-[%(module)s:%(funcName)s:%(lineno)d]-%(message)s')
     print("ExperimentRunner __main__ Test Section"); print("="*30)
     test_janus_config = JanusConfig(
@@ -583,8 +816,12 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
         if not trajectories: raise ValueError("No trajectories generated.")
         self.env_data = np.vstack(trajectories)
         logging.info(f"[{self.config.name}] Data shape {self.env_data.shape}.")
-        try: from progressive_grammar_system import Variable
-        except ImportError: logging.error("Failed to import 'Variable'"); raise
+        try:
+            # Perform a runtime check for local-scope dependencies.
+            validate_imports(REQUIRED_MODULES, globals(), scope="runtime_local")
+            # Assuming Variable is from progressive_grammar_system.variable based on REQUIRED_MODULES
+            from progressive_grammar_system.variable import Variable
+        except ImportError: logging.error("Failed to import 'Variable'"); raise # Should be caught by validate_imports if not optional
         if self.physics_env and self.physics_env.state_vars:
             self.variables = [Variable(name, idx, {}) for idx, name in enumerate(self.physics_env.state_vars)]
         else:

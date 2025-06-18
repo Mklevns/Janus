@@ -17,6 +17,8 @@ from scipy.optimize import minimize
 from sklearn.metrics import mean_squared_error
 import pickle
 from copy import deepcopy
+from functools import lru_cache
+from itertools import product, combinations_with_replacement
 from progressive_grammar_system import Expression, Variable, ProgressiveGrammar
 
 @dataclass
@@ -195,6 +197,7 @@ class SymbolicRegressor:
     """Performs symbolic regression to fit data to mathematical expressions."""
     
     def __init__(self, grammar: 'ProgressiveGrammar'):
+        # Test comment for diff application
         self.grammar = grammar
         self.population_size = 100
         self.generations = 50

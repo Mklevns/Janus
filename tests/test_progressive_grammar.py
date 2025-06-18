@@ -252,11 +252,11 @@ def test_unary_operator_conversion(grammar_and_vars):
 
     expr_inv_zero = grammar.create_expression('inv', [0.0])
     assert expr_inv_zero is not None
-    assert expr_inv_zero.symbolic == sp.nan
+    assert expr_inv_zero.symbolic == sp.Float('nan') # Updated to check for sp.Float('nan')
 
     expr_inv_int_zero = grammar.create_expression('inv', [0])
     assert expr_inv_int_zero is not None
-    assert expr_inv_int_zero.symbolic == sp.nan
+    assert expr_inv_int_zero.symbolic == sp.Float('nan') # Updated to check for sp.Float('nan')
 
     # Test 'sqrt'
     expr_sqrt_var = grammar.create_expression('sqrt', [var_a])
@@ -350,16 +350,16 @@ def test_division_by_zero_symbolic(grammar_and_vars):
     # Using var_a as 'x'
     expr_div_zero_const = grammar.create_expression('/', [var_a, 0.0])
     assert expr_div_zero_const is not None
-    assert expr_div_zero_const.symbolic == sp.nan
+    assert expr_div_zero_const.symbolic == sp.Float('nan') # Updated to check for sp.Float('nan')
 
     expr_div_zero_expr = grammar.create_expression('/', [var_a, grammar.create_expression('const', [0.0])])
     assert expr_div_zero_expr is not None
-    assert expr_div_zero_expr.symbolic == sp.nan
+    assert expr_div_zero_expr.symbolic == sp.Float('nan') # Updated to check for sp.Float('nan')
 
     # Test division of a constant by zero
     expr_const_div_zero = grammar.create_expression('/', [1.0, 0.0])
     assert expr_const_div_zero is not None
-    assert expr_const_div_zero.symbolic == sp.nan
+    assert expr_const_div_zero.symbolic == sp.Float('nan') # Updated to check for sp.Float('nan')
 
 
 def test_calculus_operations_conversion(grammar_and_vars):

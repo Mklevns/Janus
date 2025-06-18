@@ -142,6 +142,40 @@ class JanusConfig(BaseSettings):
             self.emergence_analysis_dir = str(base_path / "emergence")
         return self
 
+    @model_validator(mode='after')
+    def validate_config(self) -> 'JanusConfig':
+        # 1. num_evaluation_cycles must be positive
+        if self.num_evaluation_cycles <= 0:
+            raise ValueError(f"num_evaluation_cycles must be positive, got {self.num_evaluation_cycles}")
+
+        # 2. If curriculum_stages are defined, complexity must be non-decreasing
+        if self.use_curriculum and self.curriculum_stages:
+            if len(self.curriculum_stages) > 1:
+                previous_complexity = -1 # Assuming complexity is always non-negative
+                for i, stage in enumerate(self.curriculum_stages):
+                    current_complexity = stage.max_complexity
+                    if current_complexity < previous_complexity:
+                        raise ValueError(
+                            f"Complexity in curriculum_stages must be non-decreasing. "
+                            f"Stage {i} ('{stage.name}') has max_complexity {current_complexity} "
+                            f"which is less than previous stage's max_complexity {previous_complexity}."
+                        )
+                    previous_complexity = current_complexity
+
+        # 3. If synthetic_data_params are defined and have a time_range, it must be valid
+        if self.synthetic_data_params and self.synthetic_data_params.time_range:
+            if not (isinstance(self.synthetic_data_params.time_range, list) and len(self.synthetic_data_params.time_range) == 2):
+                raise ValueError(
+                    f"synthetic_data_params.time_range must be a list of two integers, got {self.synthetic_data_params.time_range}"
+                )
+            if self.synthetic_data_params.time_range[0] >= self.synthetic_data_params.time_range[1]:
+                raise ValueError(
+                    f"synthetic_data_params.time_range must have time_range[0] < time_range[1], "
+                    f"got {self.synthetic_data_params.time_range}"
+                )
+
+        return self
+
     model_config = SettingsConfigDict(
         env_prefix='JANUS_',
         extra='ignore',
