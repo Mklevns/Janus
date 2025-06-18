@@ -16,26 +16,27 @@ import time
 from symbolic_discovery_env import SymbolicDiscoveryEnv, ExpressionNode
 from hypothesis_policy_network import HypothesisNet, PPOTrainer
 from progressive_grammar_system import Expression
+from conservation_reward_fix import ConservationBiasedReward as NewConservationBiasedReward
 
 
-class ConservationBiasedReward:
-    """Calculates a reward bonus based on conservation principles."""
-    def compute_conservation_bonus(self, expression: str, data: np.ndarray, variables: List[Any]) -> float:
-        """
-        Computes a bonus score if the expression adheres to known conservation laws.
-        Placeholder implementation.
+# class ConservationBiasedReward:
+#     """Calculates a reward bonus based on conservation principles."""
+#     def compute_conservation_bonus(self, expression: str, data: np.ndarray, variables: List[Any]) -> float:
+#         """
+#         Computes a bonus score if the expression adheres to known conservation laws.
+#         Placeholder implementation.
 
-        Args:
-            expression: The symbolic expression string.
-            data: The training data.
-            variables: A list of variable objects/descriptors.
+#         Args:
+#             expression: The symbolic expression string.
+#             data: The training data.
+#             variables: A list of variable objects/descriptors.
 
-        Returns:
-            A float representing the conservation bonus.
-        """
-        # TODO: Implement actual conservation law checking logic
-        # For now, returning a constant value
-        return 0.5
+#         Returns:
+#             A float representing the conservation bonus.
+#         """
+#         # TODO: Implement actual conservation law checking logic
+#         # For now, returning a constant value
+#         return 0.5
 
 
 class IntrinsicRewardCalculator:
@@ -51,7 +52,7 @@ class IntrinsicRewardCalculator:
         self.diversity_weight = diversity_weight
         self.complexity_growth_weight = complexity_growth_weight
         self.conservation_weight = conservation_weight # Initialize new weight
-        self.conservation_calculator = ConservationBiasedReward() # Instantiate new module
+        self.conservation_calculator = NewConservationBiasedReward(conservation_types=['energy', 'momentum', 'mass'], weight_factor=self.conservation_weight) # Instantiate new module
         
         # History tracking
         self.expression_history: Deque[str] = deque(maxlen=1000)
@@ -81,8 +82,33 @@ class IntrinsicRewardCalculator:
         complexity_reward = self._calculate_complexity_growth_reward(complexity)
 
         # 4. Conservation Bonus
+        # Placeholder adaptation for the new ConservationBiasedReward signature
+        mock_predicted_traj = {
+            'expression_string': expression,
+            # Potentially, some evaluation of 'expression' using 'variables' if feasible here
+            # For now, keeping it simple. Actual evaluation might be part of NewConservationBiasedReward
+            # or happen before this call in a more integrated setup.
+        }
+        mock_ground_truth_traj = {
+            # Assuming 'data' contains relevant ground truth physical quantities.
+            # The new reward class expects specific keys like 'conserved_energy', 'conserved_momentum'.
+            # This mapping needs to be established. For now, pass 'data' as a generic placeholder.
+            'raw_data': data, # This 'data' is likely a numpy array from the environment.
+                               # It needs to be processed into the expected dictionary format.
+                               # For example, if data columns are [x, v, energy_gt], then
+                               # mock_ground_truth_traj = {'conserved_energy': data[:, 2]}
+                               # This specific adaptation is beyond this step, requires knowledge of 'data' structure.
+        }
+        mock_hypothesis_params = {
+            'variables_info': variables
+            # 'variables' is a list of Variable objects.
+            # NewConservationBiasedReward might expect parameter values like {'mass': 1.0}
+        }
+
         conservation_bonus = self.conservation_calculator.compute_conservation_bonus(
-            expression, data, variables
+            predicted_traj=mock_predicted_traj,
+            ground_truth_traj=mock_ground_truth_traj, # This will need careful data mapping
+            hypothesis_params=mock_hypothesis_params # This also needs mapping
         )
         
         # Combine rewards
