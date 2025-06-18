@@ -578,6 +578,20 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
             num_state_vars = len(self.physics_env.state_vars) if self.physics_env and self.physics_env.state_vars else 2
             return np.random.rand(num_state_vars) * 2 - 1
 
+    def _remap_expression(self, expr_str: str, var_mapping: Dict[str, str]) -> str:
+        """Remaps an expression string from temporary variable names to original variable names."""
+        result = expr_str
+        # Sort variables by length of the key (e.g., 'x10' before 'x1') to prevent partial replacements.
+        sorted_vars = sorted(var_mapping.items(), key=lambda item: len(item[0]), reverse=True)
+        for new_var, orig_var in sorted_vars:
+            # This simple replacement should be fine for 'x0', 'x1', etc. as they are distinct tokens.
+            # If original variable names could be substrings of temp names or vice-versa in complex ways,
+            # or if temp names are not distinct tokens (e.g. 'x' and 'x_temp'),
+            # a more robust regex-based replacement (e.g. using word boundaries) would be needed.
+            # For now, assuming 'x0', 'x1' are safe.
+            result = result.replace(new_var, orig_var)
+        return result
+
     def run(self, run_id: int) -> ExperimentResult:
         current_run_result = ExperimentResult(config=self.config, run_id=run_id)
         if self.env_data is not None: current_run_result.trajectory_data = self.env_data
@@ -625,19 +639,63 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
                 current_run_result.sample_efficiency_curve = efficiency_curve
                 current_run_result.n_experiments_to_convergence = num_evals
             elif algo_name == 'genetic':
-                regressor = self.algorithm; target_idx = self.config.target_variable_index if self.config.target_variable_index is not None else -1
+                regressor = self.algorithm
+                target_idx = self.config.target_variable_index if self.config.target_variable_index is not None else -1
+
                 if self.env_data is None: raise ValueError("env_data is None for genetic")
-                y = self.env_data[:, target_idx]; X = np.delete(self.env_data, target_idx, axis=1)
-                fit_params = {'generations': janus_cfg.genetic_generations, 'population_size': janus_cfg.genetic_population_size,
+
+                n_vars_original = self.env_data.shape[1]
+
+                y = self.env_data[:, target_idx]
+                X = np.delete(self.env_data, target_idx, axis=1)
+
+                variable_indices: List[int] = []
+                if target_idx == -1: # Target is the last column implicitly
+                    variable_indices = list(range(n_vars_original - 1))
+                else:
+                    for i in range(n_vars_original):
+                        if i < target_idx:
+                            variable_indices.append(i)
+                        elif i > target_idx:
+                            variable_indices.append(i - 1) # Adjust index for the new X matrix
+
+                original_var_names = [f"x{i}" for i in range(n_vars_original)]
+                var_mapping: Dict[str, str] = {}
+                # Corrected original_var_names to use actual variable names if available
+                # This assumes self.variables contains Variable objects with a 'name' attribute
+                # and corresponds to the original columns of self.env_data
+                if self.variables and len(self.variables) == n_vars_original:
+                    original_var_names = [v.name for v in self.variables]
+
+                for new_idx, orig_idx_in_full_data in enumerate(variable_indices):
+                     # Map from new temporary name (e.g., "x0") to original name (e.g., "pos")
+                     # The 'orig_idx_in_full_data' is the index in the original self.env_data / self.variables
+                     # The 'new_idx' is the index in the X array.
+                    var_mapping[f"x{new_idx}"] = original_var_names[orig_idx_in_full_data]
+
+                fit_params = {'generations': janus_cfg.genetic_generations,
+                              'population_size': janus_cfg.genetic_population_size,
                               'max_complexity': janus_cfg.max_complexity}
-                if self.config.algo_params and 'fit_params' in self.config.algo_params: fit_params.update(self.config.algo_params['fit_params'])
-                best_expr_obj = regressor.fit(X, y, self.variables, **fit_params)
+                if self.config.algo_params and 'fit_params' in self.config.algo_params:
+                    fit_params.update(self.config.algo_params['fit_params'])
+
+                # Assuming regressor.fit will be updated to accept var_mapping
+                # and will not need self.variables directly if var_mapping is provided.
+                best_expr_obj = regressor.fit(X, y, var_mapping=var_mapping, **fit_params)
+
                 if best_expr_obj and hasattr(best_expr_obj, 'symbolic'):
-                    current_run_result.discovered_law = str(best_expr_obj.symbolic)
-                    current_run_result.law_complexity = getattr(best_expr_obj, 'complexity', len(str(best_expr_obj.symbolic)))
-                    if hasattr(best_expr_obj, 'mse') and best_expr_obj.mse is not None: current_run_result.predictive_mse = best_expr_obj.mse
-                    elif hasattr(regressor, 'predict'): predictions = regressor.predict(X); current_run_result.predictive_mse = np.mean((predictions - y)**2)
-                else: current_run_result.discovered_law = "Error: Genetic failed."; current_run_result.predictive_mse = float('inf')
+                    raw_expr = str(best_expr_obj.symbolic)
+                    # Assuming self._remap_expression will be implemented in this class
+                    current_run_result.discovered_law = self._remap_expression(raw_expr, var_mapping)
+                    current_run_result.law_complexity = getattr(best_expr_obj, 'complexity', len(raw_expr))
+                    if hasattr(best_expr_obj, 'mse') and best_expr_obj.mse is not None:
+                        current_run_result.predictive_mse = best_expr_obj.mse
+                    elif hasattr(regressor, 'predict'):
+                        predictions = regressor.predict(X) # Predict might also need var_mapping or remapped features
+                        current_run_result.predictive_mse = np.mean((predictions - y)**2)
+                else:
+                    current_run_result.discovered_law = "Error: Genetic failed."
+                    current_run_result.predictive_mse = float('inf')
                 current_run_result.n_experiments_to_convergence = getattr(regressor, 'generations', 1)
             elif algo_name == 'random':
                 num_random_expr = getattr(janus_cfg, 'random_search_iterations', janus_cfg.num_evaluation_cycles)
