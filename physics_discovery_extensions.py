@@ -16,6 +16,7 @@ import networkx as nx
 from scipy.optimize import minimize
 from sklearn.metrics import mean_squared_error
 import pickle
+from copy import deepcopy
 from progressive_grammar_system import Expression, Variable, ProgressiveGrammar
 
 @dataclass
