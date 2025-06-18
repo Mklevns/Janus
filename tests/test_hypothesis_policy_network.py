@@ -176,6 +176,22 @@ class TestHypothesisNetMetaLearning(unittest.TestCase):
         self.assertIsInstance(value_no_task, torch.Tensor)
         self.assertEqual(value_no_task.shape, (1, 1))
 
+    def test_observation_dim_validation(self):
+        policy = HypothesisNet(
+            observation_dim=self.obs_dim,  # This will be overridden
+            action_dim=self.action_dim,
+            hidden_dim=self.hidden_dim,
+            grammar=self.grammar,
+            use_meta_learning=False # Meta-learning features are not relevant for this test
+        )
+        # policy.encoder.node_feature_dim is already set to self.node_feature_dim (128) by default in HypothesisNet init
+
+        invalid_obs_dim = self.node_feature_dim * 2 + 1 # e.g., 128 * 2 + 1 = 257, not a multiple of 128
+        invalid_observation = torch.randn(self.batch_size, invalid_obs_dim)
+
+        with self.assertRaisesRegex(ValueError, "Observation dimension must be a multiple of node_feature_dim."):
+            policy(invalid_observation, self.action_mask)
+
 if __name__ == '__main__':
     # This allows running the tests from the command line
     # However, due to sandbox issues, torch might not be available.
