@@ -137,8 +137,9 @@ class MetaLearningPolicy(nn.Module):
             nn.init.constant_(module.bias, 0.0)
     
     def forward(self, 
-                obs: torch.Tensor,
-                task_embedding: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+              obs: torch.Tensor,
+              task_embedding: Optional[torch.Tensor] = None,
+              action_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]: # Add action_mask
         """Forward pass with optional task conditioning"""
         
         # Get task modulation if available
@@ -171,6 +172,14 @@ class MetaLearningPolicy(nn.Module):
         
         # Compute outputs
         policy_logits = self.policy_head(features)
+
+        # FIX: Apply the action mask to the logits before returning
+        if action_mask is not None:
+            # Ensure mask is on the same device and has compatible shape
+            if action_mask.shape != policy_logits.shape:
+                 action_mask = action_mask.expand_as(policy_logits)
+            policy_logits[~action_mask] = -1e9 # Set invalid actions to a very small number
+
         value = self.value_head(features)
         
         # Physics predictions
@@ -185,10 +194,10 @@ class MetaLearningPolicy(nn.Module):
             'features': features
         }
     
-    def act(self, obs: torch.Tensor, task_embedding: Optional[torch.Tensor] = None) -> Tuple[int, Dict]:
+    def act(self, obs: torch.Tensor, task_embedding: Optional[torch.Tensor] = None, action_mask: Optional[torch.Tensor] = None) -> Tuple[int, Dict]:
         """Select action using current policy"""
         with torch.no_grad():
-            outputs = self.forward(obs.unsqueeze(0), task_embedding)
+            outputs = self.forward(obs.unsqueeze(0), task_embedding, action_mask)
             
             # Sample from policy
             probs = F.softmax(outputs['policy_logits'], dim=-1)
@@ -475,9 +484,12 @@ class MAMLTrainer:
             for step in range(self.config.max_episode_steps):
                 # Convert observation to tensor
                 obs_tensor = torch.FloatTensor(obs).to(self.config.device)
+
+                # FIX: Get the action mask from the environment
+                action_mask = torch.BoolTensor(env.get_action_mask()).to(self.config.device)
                 
-                # Get action from policy
-                action, action_info = policy.act(obs_tensor, task_context)
+                # Get action from policy, passing the mask
+                action, action_info = policy.act(obs_tensor, task_context, action_mask) # Pass mask
                 
                 # Take environment step
                 next_obs, reward, done, truncated, info = env.step(action)
