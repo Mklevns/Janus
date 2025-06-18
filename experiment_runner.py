@@ -27,6 +27,7 @@ import abc # Added for BaseExperiment if it uses it, and for the new class
 import logging # Added for logging within PhysicsDiscoveryExperiment methods
 import importlib.metadata # For plugin discovery
 
+from custom_exceptions import MissingDependencyError, PluginNotFoundError, InvalidConfigError, DataGenerationError
 from base_experiment import BaseExperiment # Added
 from math_utils import calculate_symbolic_accuracy
 
@@ -731,20 +732,15 @@ class ExperimentRunner:
 
         if not hasattr(config, 'experiment_type') or not config.experiment_type:
             logging.error(f"Experiment configuration '{config.name}' is missing the 'experiment_type' field.")
-            err_result = ExperimentResult(config=config, run_id=run_id, discovered_law="Error: experiment_type not specified in config.")
-            # Ensure default error values are set
-            err_result.symbolic_accuracy = 0.0
-            err_result.predictive_mse = float('inf')
-            return err_result
+            # RAISE InvalidConfigError
+            raise InvalidConfigError(f"Configuration '{config.name}' is missing the 'experiment_type' field.")
 
         experiment_class = self.experiment_plugins.get(config.experiment_type)
 
         if experiment_class is None:
             logging.error(f"Experiment type '{config.experiment_type}' for config '{config.name}' not found in discovered plugins. Available plugins: {list(self.experiment_plugins.keys())}")
-            err_result = ExperimentResult(config=config, run_id=run_id, discovered_law=f"Error: Unknown experiment_type '{config.experiment_type}'.")
-            err_result.symbolic_accuracy = 0.0
-            err_result.predictive_mse = float('inf')
-            return err_result
+            # RAISE PluginNotFoundError
+            raise PluginNotFoundError(f"Experiment type '{config.experiment_type}' for config '{config.name}' not found. Available: {list(self.experiment_plugins.keys())}")
 
         logging.info(f"Instantiating experiment of type '{config.experiment_type}' using class {experiment_class.__module__}.{experiment_class.__name__}.")
 
@@ -754,12 +750,14 @@ class ExperimentRunner:
                 algo_registry=self.algo_registry,
                 env_registry=self.env_registry
             )
-        except Exception as e:
+        except (ValueError, TypeError) as e: # Catch common configuration or type errors during instantiation
+            logging.error(f"Failed to instantiate experiment class '{experiment_class.__name__}' for type '{config.experiment_type}' due to invalid parameters or configuration. Error: {e}", exc_info=True)
+            # RAISE InvalidConfigError
+            raise InvalidConfigError(f"Failed to instantiate experiment '{config.experiment_type}' due to invalid parameters: {e}") from e
+        except Exception as e: # Catch other unexpected errors during instantiation
             logging.error(f"Failed to instantiate experiment class '{experiment_class.__name__}' for type '{config.experiment_type}'. Error: {e}", exc_info=True)
-            err_result = ExperimentResult(config=config, run_id=run_id, discovered_law=f"Error: Failed to instantiate experiment '{config.experiment_type}'.")
-            err_result.symbolic_accuracy = 0.0
-            err_result.predictive_mse = float('inf')
-            return err_result
+            # Consider if this should be a more generic error or PluginOperationFailedError
+            raise RuntimeError(f"An unexpected error occurred while instantiating experiment '{config.experiment_type}': {e}") from e
 
         result = experiment_instance.execute(run_id=run_id)
 
@@ -1738,7 +1736,8 @@ if __name__ == "__main__":
         env_class = self.env_registry.get(self.config.environment_type)
         if not env_class:
             logging.error(f"Environment type '{self.config.environment_type}' not in registry. Available: {list(self.env_registry.keys())}")
-            raise ValueError(f"Environment type '{self.config.environment_type}' not found in registry.")
+            # RAISE PluginNotFoundError
+            raise PluginNotFoundError(f"Environment type '{self.config.environment_type}' not found in registry. Available: {list(self.env_registry.keys())}")
         self.physics_env = env_class(self.config.env_params, self.config.noise_level)
         logging.info(f"[{self.config.name}] Environment '{self.config.environment_type}' created: {self.physics_env}")
 
@@ -1755,16 +1754,18 @@ if __name__ == "__main__":
 
         if not trajectories:
             logging.error(f"[{self.config.name}] No trajectories generated.")
-            raise ValueError("No trajectories generated. Check environment parameters and generation logic.")
+            # RAISE DataGenerationError
+            raise DataGenerationError(f"No trajectories generated for experiment '{self.config.name}'. Check environment parameters and generation logic.")
         self.env_data = np.vstack(trajectories)
         logging.info(f"[{self.config.name}] Training data generated with shape {self.env_data.shape}.")
 
         # 3. Create Variables for Algorithm
         try:
             from progressive_grammar_system import Variable # type: ignore
-        except ImportError:
+        except ImportError as e:
             logging.error("Failed to import 'Variable' from 'progressive_grammar_system'. Ensure it's installed and accessible.")
-            raise
+            # RAISE MissingDependencyError
+            raise MissingDependencyError("The 'Variable' class from 'progressive_grammar_system' could not be imported. Please ensure the package is installed correctly.") from e
         if self.physics_env and self.physics_env.state_vars:
             self.variables = [Variable(name, idx, {}) for idx, name in enumerate(self.physics_env.state_vars)]
         else:
@@ -1781,9 +1782,13 @@ if __name__ == "__main__":
         algo_factory = self.algo_registry.get(self.config.algorithm)
         if not algo_factory:
             logging.error(f"Algorithm '{self.config.algorithm}' not in registry. Available: {list(self.algo_registry.keys())}")
-            raise ValueError(f"Algorithm '{self.config.algorithm}' not found in registry.")
-        # Pass self.config to algo_factory for algorithm-specific parameters
-        self.algorithm = algo_factory(self.env_data, self.variables, self.config)
+            # RAISE PluginNotFoundError
+            raise PluginNotFoundError(f"Algorithm '{self.config.algorithm}' not found in registry. Available: {list(self.algo_registry.keys())}")
+        try:
+            self.algorithm = algo_factory(self.env_data, self.variables, self.config)
+        except (TypeError, ValueError) as e: # Catch issues if algo_factory fails due to bad config from self.config
+            logging.error(f"Failed to create algorithm '{self.config.algorithm}' due to configuration or parameter error: {e}", exc_info=True)
+            raise InvalidConfigError(f"Failed to create algorithm '{self.config.algorithm}' with the provided configuration: {e}") from e
         logging.info(f"[{self.config.name}] Algorithm '{self.config.algorithm}' created: {type(self.algorithm).__name__}")
 
         # 5. Get Ground Truth Laws
@@ -2009,14 +2014,10 @@ if __name__ == "__main__":
                 self.experiment_result.trajectory_data = self.env_data
 
             logging.info(f"[{self.config.name}] EXECUTE: Starting run (run {run_id})...")
-            # The 'run' method is responsible for creating and returning its own ExperimentResult,
-            # which we then adopt as the main result of this execution.
-            run_specific_result = self.run(run_id=run_id)
+            run_specific_result = self.run(run_id=run_id) # This method is designed to return a result with error info for algo failures
 
             # Merge results from run_specific_result into self.experiment_result
-            # This ensures that even if run_specific_result is a new instance,
-            # its data is captured in the experiment_result managed by 'execute'.
-            if run_specific_result: # run_specific_result should always be an ExperimentResult
+            if run_specific_result:
                 self.experiment_result.discovered_law = run_specific_result.discovered_law
                 self.experiment_result.symbolic_accuracy = run_specific_result.symbolic_accuracy
                 self.experiment_result.predictive_mse = run_specific_result.predictive_mse
@@ -2024,22 +2025,25 @@ if __name__ == "__main__":
                 self.experiment_result.n_experiments_to_convergence = run_specific_result.n_experiments_to_convergence
                 self.experiment_result.sample_efficiency_curve = run_specific_result.sample_efficiency_curve
                 self.experiment_result.component_metrics = run_specific_result.component_metrics
-                if run_specific_result.trajectory_data is not None: # Ensure trajectory data is kept if run updated it
+                if run_specific_result.trajectory_data is not None:
                     self.experiment_result.trajectory_data = run_specific_result.trajectory_data
-            else: # Should not happen if run() is implemented correctly
+            else:
                  logging.error(f"[{self.config.name}] EXECUTE: run() method returned None. This is unexpected.")
                  self.experiment_result.discovered_law = "Error: run() returned None"
 
-
             logging.info(f"[{self.config.name}] EXECUTE: Run complete (run {run_id}). Discovered: '{self.experiment_result.discovered_law}'")
 
+        except (PluginNotFoundError, InvalidConfigError, DataGenerationError, MissingDependencyError) as e:
+            # These are setup-related errors, re-raise them directly
+            logging.error(f"[{self.config.name}] EXECUTE: Setup failed for run {run_id} with a critical configuration or dependency error: {e}", exc_info=True)
+            raise # Re-raise the specific custom exception
         except Exception as e:
-            logging.error(f"[{self.config.name}] EXECUTE: Exception during setup or run (run {run_id}): {e}", exc_info=True)
-            if self.experiment_result: # Ensure it exists
-                self.experiment_result.discovered_law = f"Critical Error: {str(e)[:150]}" # Truncate long errors
+            # Catch other unexpected errors during setup or if run() itself raises an unexpected exception
+            logging.error(f"[{self.config.name}] EXECUTE: Unexpected exception during setup or run phase for run {run_id}: {e}", exc_info=True)
+            if self.experiment_result:
+                self.experiment_result.discovered_law = f"Unexpected Critical Error: {str(e)[:150]}"
                 self.experiment_result.symbolic_accuracy = 0.0
                 self.experiment_result.predictive_mse = float('inf')
-            # Depending on desired behavior, could re-raise e here
         finally:
             current_wall_time = time.time() - self._start_time
             if self.experiment_result: # Ensure it exists
