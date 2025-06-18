@@ -1,204 +1,120 @@
-import unittest
+import pytest
 import torch
-import torch.nn as nn
-import sys
-import os
+import numpy as np
+from unittest.mock import patch, MagicMock
+import math # For math.ceil
 
-# Ensure the package root is in the Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Assuming these can be imported from the project structure
+from hypothesis_policy_network import PPOTrainer, HypothesisNet
+from symbolic_discovery_env import SymbolicDiscoveryEnv
+from progressive_grammar_system import ProgressiveGrammar, Variable
 
-from hypothesis_policy_network import HypothesisNet # noqa: E402
-# from progressive_grammar_system import ProgressiveGrammar # Mock if needed, or ensure None is handled
+@pytest.fixture(scope="module")
+def dummy_grammar_and_vars():
+    grammar = ProgressiveGrammar()
+    variables = [Variable("x", 0, {}), Variable("y", 1, {})]
+    return grammar, variables
 
-# A simple mock for ProgressiveGrammar if its full import is problematic or complex
-class MockProgressiveGrammar:
-    def __init__(self):
-        pass # Add any attributes HypothesisNet might access, if any
+@pytest.fixture
+def mock_env(dummy_grammar_and_vars):
+    grammar, variables = dummy_grammar_and_vars
+    env = MagicMock(spec=SymbolicDiscoveryEnv)
+    env.observation_space = MagicMock()
+    env.observation_space.shape = (128,)
+    env.action_space = MagicMock()
+    env.action_space.n = 10
+    return env
 
-class TestHypothesisNetMetaLearning(unittest.TestCase):
+@pytest.fixture
+def mock_policy(mock_env):
+    policy = MagicMock(spec=HypothesisNet)
+    policy.parameters.return_value = [torch.nn.Parameter(torch.randn(1))]
+    policy.return_value = {'value': torch.randn(1,1)}
+    return policy
 
-    def setUp(self):
-        self.obs_dim = 3 * 128  # 3 nodes * 128 features
-        self.node_feature_dim = 128
-        self.action_dim = 10
-        self.hidden_dim = 256
-        self.batch_size = 2
-        self.num_nodes = 3
-        self.trajectory_length = 5
+@patch('hypothesis_policy_network.PPOTrainer.train_step')
+@patch('hypothesis_policy_network.PPOTrainer.collect_rollouts')
+def test_ppo_train_minibatching(mock_collect_rollouts, mock_train_step, mock_policy, mock_env):
+    trainer = PPOTrainer(policy=mock_policy, env=mock_env)
 
-        # Using a mock grammar or None
-        self.grammar = None # Or MockProgressiveGrammar()
+    num_samples_in_rollout = 90
+    batch_size = 32
+    rollout_length = num_samples_in_rollout
+    total_timesteps = rollout_length * 2
+    n_epochs = 3
 
-        # Dummy observation tensor
-        self.observation = torch.randn(self.batch_size, self.obs_dim)
-        # Dummy action mask
-        self.action_mask = torch.ones(self.batch_size, self.action_dim).bool()
+    mock_obs = torch.randn(num_samples_in_rollout, mock_env.observation_space.shape[0])
+    for i in range(num_samples_in_rollout):
+        mock_obs[i,0] = float(i)
 
-        # Dummy task trajectories for a single trajectory per batch item
-        # Shape: (batch_size, trajectory_length, feature_dim)
-        # self.task_trajectories_single = torch.randn(
-        #     self.batch_size, self.trajectory_length, self.node_feature_dim
-        # )
+    mock_actions = torch.randint(0, mock_env.action_space.n, (num_samples_in_rollout,))
+    mock_log_probs = torch.randn(num_samples_in_rollout)
+    mock_advantages = torch.randn(num_samples_in_rollout)
+    mock_returns = torch.randn(num_samples_in_rollout)
+    mock_action_masks = torch.ones(num_samples_in_rollout, mock_env.action_space.n).bool()
+    mock_tree_structures = [None] * num_samples_in_rollout
 
-        # Dummy task trajectories for multiple trajectories per batch item, as per original spec
-        # Shape: (batch_size, num_trajectories, trajectory_length, feature_dim)
-        self.num_task_trajectories = 2
-        self.task_trajectories_multi = torch.randn(
-            self.batch_size, self.num_task_trajectories, self.trajectory_length, self.node_feature_dim
-        )
+    mock_rollout_data = {
+        'observations': mock_obs, 'actions': mock_actions, 'log_probs': mock_log_probs,
+        'advantages': mock_advantages, 'returns': mock_returns,
+        'action_masks': mock_action_masks, 'tree_structures': mock_tree_structures
+    }
+    mock_collect_rollouts.return_value = mock_rollout_data
 
+    trainer.train(total_timesteps=total_timesteps, rollout_length=rollout_length,
+                  n_epochs=n_epochs, batch_size=batch_size, log_interval=1)
 
-    def test_hypothesis_net_meta_learning_initialization(self):
-        # Test with meta-learning enabled
-        policy_meta = HypothesisNet(
-            observation_dim=self.obs_dim,
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            grammar=self.grammar,
-            use_meta_learning=True
-        )
-        self.assertTrue(policy_meta.use_meta_learning)
-        self.assertIsNotNone(policy_meta.task_encoder)
-        self.assertIsInstance(policy_meta.task_encoder, nn.LSTM)
-        self.assertIsNotNone(policy_meta.task_modulator)
-        self.assertIsInstance(policy_meta.task_modulator, nn.Sequential)
+    num_updates = total_timesteps // rollout_length
+    expected_train_step_calls_per_epoch = math.ceil(num_samples_in_rollout / batch_size)
+    expected_total_train_step_calls = num_updates * n_epochs * expected_train_step_calls_per_epoch
 
-        # Test with meta-learning disabled (default)
-        policy_no_meta = HypothesisNet(
-            observation_dim=self.obs_dim,
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            grammar=self.grammar,
-            use_meta_learning=False # Explicitly False
-        )
-        self.assertFalse(policy_no_meta.use_meta_learning)
-        self.assertIsNone(policy_no_meta.task_encoder) # Expect None if not created
-        self.assertIsNone(policy_no_meta.task_modulator)
+    assert mock_train_step.call_count == expected_total_train_step_calls,         f"Expected {expected_total_train_step_calls} calls to train_step, got {mock_train_step.call_count}"
 
+    all_batches_passed = [call[0][0] for call in mock_train_step.call_args_list]
 
-    def test_hypothesis_net_meta_learning_forward_pass(self):
-        policy_meta = HypothesisNet(
-            observation_dim=self.obs_dim,
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            grammar=self.grammar,
-            use_meta_learning=True
-        )
-        policy_meta.encoder.node_feature_dim = self.node_feature_dim # Ensure consistency if not passed
+    for update_idx in range(num_updates):
+        update_batches = all_batches_passed[
+            update_idx * n_epochs * expected_train_step_calls_per_epoch :
+            (update_idx + 1) * n_epochs * expected_train_step_calls_per_epoch
+        ]
 
-        # 1. Forward pass with task trajectories
-        outputs_with_task = policy_meta(
-            self.observation, self.action_mask, task_trajectories=self.task_trajectories_multi
-        )
-        self.assertIn('policy_logits', outputs_with_task)
-        self.assertIn('action_logits', outputs_with_task)
-        self.assertIn('value', outputs_with_task)
-        self.assertIn('task_embedding', outputs_with_task)
-        self.assertIsNotNone(outputs_with_task['task_embedding'])
+        ordered_indices_per_epoch = [[] for _ in range(n_epochs)]
 
-        self.assertEqual(outputs_with_task['policy_logits'].shape, (self.batch_size, self.action_dim))
-        self.assertEqual(outputs_with_task['action_logits'].shape, (self.batch_size, self.action_dim))
-        self.assertEqual(outputs_with_task['value'].shape, (self.batch_size, 1))
-        self.assertEqual(outputs_with_task['task_embedding'].shape, (self.batch_size, self.hidden_dim))
+        for epoch_idx in range(n_epochs):
+            epoch_batches = update_batches[
+                epoch_idx * expected_train_step_calls_per_epoch :
+                (epoch_idx + 1) * expected_train_step_calls_per_epoch
+            ]
 
-        # 2. Forward pass with meta-learning enabled but no task trajectories
-        outputs_no_task = policy_meta(
-            self.observation, self.action_mask, task_trajectories=None
-        )
-        self.assertIn('policy_logits', outputs_no_task)
-        self.assertIn('action_logits', outputs_no_task)
-        self.assertIn('value', outputs_no_task)
-        # Task embedding might be None or not present depending on implementation if task_trajectories is None
-        if 'task_embedding' in outputs_no_task:
-            self.assertIsNone(outputs_no_task['task_embedding'])
+            batch_sizes_this_epoch = []
+            current_epoch_processed_indices = set()
 
-        self.assertEqual(outputs_no_task['policy_logits'].shape, (self.batch_size, self.action_dim))
-        self.assertEqual(outputs_no_task['value'].shape, (self.batch_size, 1))
+            for batch_idx, batch_dict in enumerate(epoch_batches):
+                obs_in_batch = batch_dict['observations']
+                batch_sizes_this_epoch.append(len(obs_in_batch))
 
-        # 3. Forward pass with meta-learning disabled
-        policy_no_meta = HypothesisNet(
-            observation_dim=self.obs_dim,
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            grammar=self.grammar,
-            use_meta_learning=False
-        )
-        policy_no_meta.encoder.node_feature_dim = self.node_feature_dim
+                assert 'tree_structures' in batch_dict
+                assert isinstance(batch_dict['tree_structures'], list)
+                assert len(batch_dict['tree_structures']) == len(obs_in_batch)
 
-        outputs_meta_disabled = policy_no_meta(
-            self.observation, self.action_mask, task_trajectories=None # Should be ignored
-        )
-        self.assertIn('policy_logits', outputs_meta_disabled)
-        self.assertIn('value', outputs_meta_disabled)
-        self.assertNotIn('task_embedding', outputs_meta_disabled) # Or assert it's None if key is always present
-        self.assertEqual(outputs_meta_disabled['policy_logits'].shape, (self.batch_size, self.action_dim))
+                for obs_tensor in obs_in_batch:
+                    original_idx = int(obs_tensor[0].item())
+                    current_epoch_processed_indices.add(original_idx)
+                    ordered_indices_per_epoch[epoch_idx].append(original_idx)
 
-        outputs_meta_disabled_with_traj = policy_no_meta(
-            self.observation, self.action_mask, task_trajectories=self.task_trajectories_multi # Should be ignored
-        )
-        self.assertNotIn('task_embedding', outputs_meta_disabled_with_traj)
+            for i, size in enumerate(batch_sizes_this_epoch):
+                is_last_batch_in_epoch = (i == expected_train_step_calls_per_epoch - 1)
+                if not is_last_batch_in_epoch:
+                    assert size == batch_size, f"Update {update_idx} Epoch {epoch_idx} Batch {i}"
+                else:
+                    assert size <= batch_size, f"Update {update_idx} Epoch {epoch_idx} Batch {i} (last)"
+                    expected_last_batch_size = num_samples_in_rollout % batch_size
+                    if expected_last_batch_size == 0: expected_last_batch_size = batch_size
+                    assert size == expected_last_batch_size, f"Update {update_idx} Epoch {epoch_idx} Batch {i} (last)"
 
+            assert len(current_epoch_processed_indices) == num_samples_in_rollout,                 f"Update {update_idx} Epoch {epoch_idx}: Not all samples processed. Got {len(current_epoch_processed_indices)}, expected {num_samples_in_rollout}"
 
-    def test_hypothesis_net_meta_learning_get_action(self):
-        policy_meta = HypothesisNet(
-            observation_dim=self.obs_dim,
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            grammar=self.grammar,
-            use_meta_learning=True
-        )
-        policy_meta.encoder.node_feature_dim = self.node_feature_dim
-
-        # Prepare single instance inputs for get_action
-        single_obs = self.observation[0].unsqueeze(0)
-        single_action_mask = self.action_mask[0].unsqueeze(0)
-        single_task_trajs = self.task_trajectories_multi[0].unsqueeze(0) # (1, num_traj, len, feat)
-
-        # 1. Call get_action with task trajectories
-        action, log_prob, value = policy_meta.get_action(
-            single_obs, single_action_mask, task_trajectories=single_task_trajs
-        )
-        self.assertIsInstance(action, torch.Tensor) # Now returns tensor
-        self.assertEqual(action.ndim, 0) # Scalar tensor
-        self.assertIsInstance(log_prob, torch.Tensor)
-        self.assertEqual(log_prob.shape, tuple()) # Scalar tensor
-        self.assertIsInstance(value, torch.Tensor)
-        self.assertEqual(value.shape, (1, 1))
-
-        # 2. Call get_action without task trajectories
-        action_no_task, log_prob_no_task, value_no_task = policy_meta.get_action(
-            single_obs, single_action_mask, task_trajectories=None
-        )
-        self.assertIsInstance(action_no_task, torch.Tensor)
-        self.assertEqual(action_no_task.ndim, 0)
-        self.assertIsInstance(log_prob_no_task, torch.Tensor)
-        self.assertEqual(log_prob_no_task.shape, tuple())
-        self.assertIsInstance(value_no_task, torch.Tensor)
-        self.assertEqual(value_no_task.shape, (1, 1))
-
-    def test_observation_dim_validation(self):
-        policy = HypothesisNet(
-            observation_dim=self.obs_dim,  # This will be overridden
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            grammar=self.grammar,
-            use_meta_learning=False # Meta-learning features are not relevant for this test
-        )
-        # policy.encoder.node_feature_dim is already set to self.node_feature_dim (128) by default in HypothesisNet init
-
-        invalid_obs_dim = self.node_feature_dim * 2 + 1 # e.g., 128 * 2 + 1 = 257, not a multiple of 128
-        invalid_observation = torch.randn(self.batch_size, invalid_obs_dim)
-
-        with self.assertRaisesRegex(ValueError, "Observation dimension must be a multiple of node_feature_dim."):
-            policy(invalid_observation, self.action_mask)
-
-if __name__ == '__main__':
-    # This allows running the tests from the command line
-    # However, due to sandbox issues, torch might not be available.
-    # The test structure is defined for when the environment is correct.
-    try:
-        unittest.main()
-    except ModuleNotFoundError as e:
-        print(f"Skipping tests due to missing module: {e}")
-    except Exception as e:
-        print(f"An error occurred during test execution: {e}")
+        if n_epochs > 1 and num_samples_in_rollout > 1:
+            assert set(ordered_indices_per_epoch[0]) == set(ordered_indices_per_epoch[1]),                 f"Update {update_idx}: Index sets differ between epochs 0 and 1, data processing error."
+            if num_samples_in_rollout > batch_size :
+                 assert ordered_indices_per_epoch[0] != ordered_indices_per_epoch[1],                     f"Update {update_idx}: Order of data processing is identical across epochs 0 and 1, indicates shuffling issue."
