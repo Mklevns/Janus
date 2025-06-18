@@ -143,6 +143,25 @@ class LiveMonitor:
 
         self.data_history: Dict[str, deque] = {key: deque(maxlen=500) for key in self.plot_config.keys()}
         self.data_history['timestamps'] = deque(maxlen=500)
+        self.phase_transition_history: deque = deque(maxlen=500) # Original deque for raw events, might be removed later if not used
+        self.data_history['phase_numeric'] = deque(maxlen=500)
+        self.data_history['phase_timestamps'] = deque(maxlen=500)
+
+        # Phase visualization attributes
+        self.phase_to_numeric: Dict[str, int] = {
+            'stagnation': 0,
+            'exploration': 1,
+            'breakthrough': 2,
+            'simplification': 3,
+            'refinement': 4
+        }
+        self.phase_colors: Dict[str, str] = {
+            'stagnation': 'gray',
+            'exploration': 'blue',
+            'breakthrough': 'green',
+            'simplification': 'orange',
+            'refinement': 'purple'
+        }
 
         self.is_running = False
         self.thread: Optional[threading.Thread] = None
@@ -169,7 +188,13 @@ class LiveMonitor:
             'symmetry_score': {'label': 'Symmetry Score', 'color': 'red', 'ax_idx': 1},
             'best_hypothesis_score': {'label': 'Best Hypothesis Score', 'color': 'purple', 'ax_idx': 0},
             'entropy_production': {'label': 'Entropy Production', 'color': 'orange', 'ax_idx': 2},
-            'step': {'label': 'Training Step', 'color': 'grey', 'ax_idx': 3, 'plot_type': 'line'}
+            'step': {'label': 'Training Step', 'color': 'grey', 'ax_idx': 3, 'plot_type': 'line'}, # Note: ax_idx 3 was already used by 'step'
+            'phase_transitions': {
+                'label': 'Training Phase',
+                'color': 'purple', # Default, can be overridden by self.phase_colors
+                'ax_idx': 3, # Will share with 'step' or use a new one if step is moved/changed
+                'plot_type': 'step' # 'step' plot type is suitable for discrete phase changes
+            }
         }
 
     def _setup_plot(self):
@@ -182,11 +207,33 @@ class LiveMonitor:
         self.lines = {}
         for key, config in self.plot_config.items():
             if key == 'step': continue
-            ax = self.axes[config['ax_idx']]
-            line, = ax.plot([], [], label=config['label'], color=config['color'])
+
+            ax_idx = config['ax_idx']
+            # Ensure axes list is long enough (it should be due to num_subplots calculation)
+            if ax_idx >= len(self.axes):
+                print(f"Warning: ax_idx {ax_idx} for '{key}' is out of bounds. Number of axes: {len(self.axes)}")
+                # Potentially skip this plot or handle error, for now, let's assume it's correct
+                # or that 'step' plot_type might not need a line in the same way
+                if config.get('plot_type') != 'step' or key == 'phase_transitions': # phase_transitions needs a line
+                     continue
+
+
+            ax = self.axes[ax_idx]
+
+            if key == 'phase_transitions':
+                # Set y-axis ticks and labels for phase transitions
+                ax.set_yticks(list(self.phase_to_numeric.values()))
+                ax.set_yticklabels(list(self.phase_to_numeric.keys()))
+                # Use a step plot for phases
+                line, = ax.step([], [], where='post', label=config['label'], color=config.get('color', 'purple'))
+                ax.set_ylabel(config['label']) # Set Y-label specifically for this axis
+            else:
+                line, = ax.plot([], [], label=config['label'], color=config['color'])
+                ax.set_ylabel(config['label'])
+
             self.lines[key] = line
             ax.legend(loc='upper left')
-            ax.set_ylabel(config['label'])
+
 
         self.axes[-1].set_xlabel("Time / Steps")
         self.fig.tight_layout()
@@ -195,25 +242,53 @@ class LiveMonitor:
     def _update_plot(self, frame: Optional[Any] = None):
         if not _MPL_AVAILABLE: return True
 
-        x_data_key = 'step' if 'step' in self.data_history and len(self.data_history['step']) > 0 else 'timestamps'
-        x_data = self.data_history[x_data_key]
-        if not list(x_data): return True
+        x_data_key_primary = 'step' if 'step' in self.data_history and len(self.data_history['step']) > 0 else 'timestamps'
+        x_axis_primary = self.data_history[x_data_key_primary]
+
+        # It's possible x_axis_primary is empty if no data has arrived for 'step' or 'timestamps'
+        # We should still attempt to plot phases if they have their own timestamps.
+        # However, if sharex is True, an empty primary x-axis might lead to issues.
+        # For now, let's proceed with the logic that plots may proceed if they have data.
 
         for key, line in self.lines.items():
-            if key in self.data_history and len(self.data_history[key]) > 0:
-                y_data = list(self.data_history[key])
-                current_x_data = list(x_data)
+            config = self.plot_config[key]
+            ax = self.axes[config['ax_idx']]
+            current_y_data = None
+            current_x_data_for_line = None
 
-                if len(y_data) <= len(current_x_data) :
-                    plot_x_data = current_x_data[-len(y_data):]
-                    line.set_data(plot_x_data, y_data)
+            if key == 'phase_transitions':
+                if self.data_history['phase_timestamps'] and self.data_history['phase_numeric']:
+                    current_x_data_for_line = list(self.data_history['phase_timestamps'])
+                    current_y_data = list(self.data_history['phase_numeric'])
+            elif key in self.data_history and self.data_history[key]: # For other plot types
+                current_y_data = list(self.data_history[key])
+                primary_x_list = list(x_axis_primary) # Use the determined primary x-axis
 
-                ax_idx = self.plot_config[key]['ax_idx']
-                self.axes[ax_idx].relim()
-                self.axes[ax_idx].autoscale_view()
+                if not primary_x_list and current_y_data: # If no primary x-axis data, cannot plot regular lines
+                    current_x_data_for_line = None
+                    current_y_data = None
+                elif primary_x_list: # Only proceed if primary x-axis has data
+                    if len(current_y_data) <= len(primary_x_list):
+                        current_x_data_for_line = primary_x_list[-len(current_y_data):]
+                    else:
+                        # y_data is longer than primary x_axis, truncate y_data to match x_axis length
+                        current_x_data_for_line = primary_x_list
+                        current_y_data = current_y_data[:len(primary_x_list)]
 
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
+            if current_x_data_for_line and current_y_data:
+                line.set_data(current_x_data_for_line, current_y_data)
+                ax.relim()
+                ax.autoscale_view()
+            elif key != 'phase_transitions': # Clear non-phase lines if no data
+                # This handles the case where a metric stops reporting or has no initial data
+                # We might not want to clear phase_transitions if it's sparse and meant to persist
+                line.set_data([],[])
+                ax.relim()
+                ax.autoscale_view()
+
+        if self.fig.canvas.manager and self.fig.canvas.manager.window: # Check if figure is valid
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
         return True
 
     def _process_log_entry(self, entry: Dict[str, Any]):
@@ -348,6 +423,21 @@ class LiveMonitor:
             print("Warning: direct_log_entry called but source is not 'callback'.")
         self._process_log_entry(entry)
 
+    def log_phase_transition(self, event: Dict[str, Any]):
+        """Logs a phase transition event."""
+        # self.phase_transition_history.append(event) # Keep original history if needed for other purposes
+
+        timestamp = event.get('timestamp', time.time()) # Ensure timestamp exists
+        phase_type = event.get('type')
+
+        if phase_type is not None:
+            self.data_history['phase_timestamps'].append(timestamp)
+            numeric_phase = self.phase_to_numeric.get(phase_type, -1) # Default to -1 for unknown
+            self.data_history['phase_numeric'].append(numeric_phase)
+        else:
+            print(f"Warning: Phase transition event missing 'type': {event}")
+
+
 if __name__ == '__main__':
     print("Starting Live Monitor Example...")
     
@@ -380,6 +470,20 @@ if __name__ == '__main__':
                 conservation_bonus=float(conservation), symmetry_score=float(symmetry),
                 discovered_law_params={'p1': float(np.random.rand()), 'p2': str(np.random.choice(['a','b']))},
                 best_hypothesis_score=float(best_score), entropy_production=entropy )
+
+            # Simulate phase transitions for testing phase transition plotting
+            current_time = time.time() # Use a consistent timestamp for events in the same iteration
+            if i == 5:
+                monitor.log_phase_transition({'timestamp': current_time, 'type': 'exploration', 'step': i})
+            elif i == 15:
+                monitor.log_phase_transition({'timestamp': current_time, 'type': 'breakthrough', 'step': i})
+            elif i == 25:
+                # Using 'simplification' as an example, assuming it's in phase_to_numeric
+                # Or stick to 'refinement' if 'simplification' might not always be there.
+                # Based on previous context, 'refinement' is present.
+                monitor.log_phase_transition({'timestamp': current_time, 'type': 'refinement', 'step': i})
+            elif i == 35:
+                monitor.log_phase_transition({'timestamp': current_time, 'type': 'stagnation', 'step': i})
 
             if _MPL_AVAILABLE and hasattr(monitor,'fig') and monitor.fig.canvas.manager :
                 plt.pause(0.01)

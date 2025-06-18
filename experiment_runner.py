@@ -35,6 +35,20 @@ from robust_hypothesis_extraction import HypothesisTracker, JanusTrainingIntegra
 from conservation_reward_fix import ConservationBiasedReward
 from symmetry_detection_fix import PhysicsSymmetryDetector
 from live_monitor import TrainingLogger, LiveMonitor
+# Attempt to import EmergentBehaviorTracker, handle if not found
+try:
+    from emergent_monitor import EmergentBehaviorTracker
+    _EMERGENT_MONITOR_AVAILABLE = True
+except ImportError:
+    _EMERGENT_MONITOR_AVAILABLE = False
+    logging.warning("EmergentBehaviorTracker not found in emergent_monitor. Phase transition tracking will be disabled.")
+    # Define a dummy class if not available to prevent errors during initialization
+    class EmergentBehaviorTracker:
+        def __init__(self, *args, **kwargs):
+            logging.warning("Using dummy EmergentBehaviorTracker as the real one is not available.")
+            self.phase_detector = type('DummyPhaseDetector', (object,), {'phase_transitions': []})()
+        def log_discovery(self, *args, **kwargs): pass
+
 from sympy import lambdify, symbols
 from progressive_grammar_system import Expression as SymbolicExpression
 from config_models import JanusConfig, SyntheticDataParamsConfig
@@ -527,6 +541,34 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
         self.experiment_result: Optional[ExperimentResult] = None
         self._start_time: float = 0.0
 
+        if _EMERGENT_MONITOR_AVAILABLE:
+            self.emergent_tracker = EmergentBehaviorTracker(save_dir=str(self.tracker_save_dir / "emergent_analysis"))
+        else:
+            # Use the dummy version if the real one couldn't be imported
+            self.emergent_tracker = EmergentBehaviorTracker(save_dir=str(self.tracker_save_dir / "emergent_analysis"))
+        self._last_logged_phase_idx_to_monitor = 0
+
+    def _flush_new_phase_transitions_to_live_monitor(self):
+        if not hasattr(self, 'emergent_tracker') or not _EMERGENT_MONITOR_AVAILABLE:
+            return
+        if not hasattr(self, 'live_monitor') or not self.live_monitor:
+            return
+
+        # Ensure phase_detector exists, even if it's a dummy
+        if not hasattr(self.emergent_tracker, 'phase_detector'):
+            return
+
+        all_transitions = self.emergent_tracker.phase_detector.phase_transitions
+        new_transitions_to_log = all_transitions[self._last_logged_phase_idx_to_monitor:]
+
+        for transition_event in new_transitions_to_log:
+            # log_phase_transition expects Dict[str, Any] with 'timestamp' and 'type'
+            # transition_event is typically {'timestamp': ..., 'type': ..., 'metrics': ...}
+            # Forwarding the whole event is fine as log_phase_transition uses .get()
+            self.live_monitor.log_phase_transition(transition_event)
+
+        self._last_logged_phase_idx_to_monitor = len(all_transitions)
+
     def setup(self):
         logging.info(f"[{self.config.name}] Setup: Seed {self.config.seed}, Env '{self.config.environment_type}', Algo '{self.config.algorithm}'.")
         np.random.seed(self.config.seed); torch.manual_seed(self.config.seed)
@@ -620,12 +662,38 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
                                                     'functional_form': str(eval_entry.get('expression'))}
                             self.training_integration.on_hypothesis_evaluated(hyp_data, eval_results_tracker, current_total_steps, i)
                         if hasattr(trainer.env, 'clear_evaluation_cache'): trainer.env.clear_evaluation_cache()
+
+                    current_best_mse_for_log = float('inf') # For logging efficiency curve
                     if self.training_integration:
                         best_hyp = self.training_integration.get_best_discovered_law(criterion='overall')
                         if best_hyp:
-                            best_expr_overall = best_hyp['hypothesis_data']
-                            best_mse_overall = best_hyp['evaluation_results'].get('trajectory_fit', float('inf'))
-                    efficiency_curve.append((current_total_steps, best_mse_overall))
+                            hyp_data = best_hyp['hypothesis_data']
+                            eval_res = best_hyp['evaluation_results']
+                            current_best_mse_for_log = eval_res.get('trajectory_fit', float('inf')) # Update for efficiency curve
+
+                            if _EMERGENT_MONITOR_AVAILABLE and hasattr(self, 'emergent_tracker'):
+                                current_mse = eval_res.get('trajectory_fit', eval_res.get('mse', float('inf')))
+                                discovery_info = {
+                                    'complexity': eval_res.get('complexity', len(str(hyp_data.get('expression_str', hyp_data)))),
+                                    'mse': current_mse,
+                                    'accuracy': 1.0 / (1.0 + current_mse) if current_mse != float('inf') and current_mse >= 0 else 0.0,
+                                    'novelty': eval_res.get('novelty_score', 0.0) # If available
+                                    # Any other metrics from eval_res can be added here
+                                }
+                                self.emergent_tracker.log_discovery(
+                                    expression=str(hyp_data.get('expression_str', hyp_data)),
+                                    info=discovery_info,
+                                    discovery_path=[] # Placeholder for discovery path
+                                )
+                        # Update best_expr_overall and best_mse_overall for efficiency curve logging
+                        # This part was slightly adjusted to ensure these variables are updated for the curve
+                        if best_hyp:
+                             best_expr_overall = best_hyp['hypothesis_data'] # Already assigned above, but make sure it's in scope
+                             best_mse_overall = current_best_mse_for_log       # Use the mse from the current best hypothesis
+
+                    efficiency_curve.append((current_total_steps, best_mse_overall if 'best_mse_overall' in locals() else current_best_mse_for_log))
+                    self._flush_new_phase_transitions_to_live_monitor() # Call flush at the end of each eval cycle
+
                 if self.training_integration:
                     final_best_hyp = self.training_integration.get_best_discovered_law(criterion='overall')
                     if final_best_hyp:
@@ -696,14 +764,34 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
                 else:
                     current_run_result.discovered_law = "Error: Genetic failed."
                     current_run_result.predictive_mse = float('inf')
+
+                if _EMERGENT_MONITOR_AVAILABLE and hasattr(self, 'emergent_tracker') and \
+                   current_run_result.discovered_law and not current_run_result.discovered_law.startswith("Error:"):
+                    current_mse_ga = current_run_result.predictive_mse
+                    info_dict = {
+                        'complexity': current_run_result.law_complexity,
+                        'mse': current_mse_ga,
+                        'accuracy': 1.0 / (1.0 + current_mse_ga) if current_mse_ga != float('inf') and current_mse_ga >= 0 else 0.0
+                        # Add novelty if available/calculable for GA
+                    }
+                    self.emergent_tracker.log_discovery(
+                        expression=current_run_result.discovered_law,
+                        info=info_dict,
+                        discovery_path=[] # Placeholder
+                    )
+                self._flush_new_phase_transitions_to_live_monitor() # Call flush after GA discovery attempt
+
                 current_run_result.n_experiments_to_convergence = getattr(regressor, 'generations', 1)
             elif algo_name == 'random':
                 num_random_expr = getattr(janus_cfg, 'random_search_iterations', janus_cfg.num_evaluation_cycles)
                 # Simplified random search logic for brevity
+                # No specific log_discovery for random search for now, unless meaningful metrics are generated
                 current_run_result.discovered_law = "random_placeholder"; current_run_result.predictive_mse = np.random.rand()*5
                 current_run_result.n_experiments_to_convergence = num_random_expr
+                self._flush_new_phase_transitions_to_live_monitor() # Call flush after random search loop
             else: current_run_result.discovered_law = f"Error: Unknown algo '{algo_name}'"
-            if self.ground_truth_laws and current_run_result.discovered_law:
+
+            if self.ground_truth_laws and current_run_result.discovered_law and not current_run_result.discovered_law.startswith("Error:"):
                 current_run_result.symbolic_accuracy = calculate_symbolic_accuracy(current_run_result.discovered_law, self.ground_truth_laws)
         except Exception as e:
             logging.error(f"[{self.config.name}] Algo exec error ('{algo_name}'): {e}", exc_info=True)
