@@ -1,0 +1,23 @@
+# Core Scientific Computing & Data Handling
+numpy==2.0.1
+pandas==2.2.2
+scipy==1.13.1
+sympy==1.12
+
+# Machine Learning & RL
+torch==2.3.1
+scikit-learn==1.5.0
+gymnasium==1.0.0
+
+# Utilities & Configuration
+tqdm==4.66.4
+pydantic==2.7.4
+pydantic-settings==2.3.0
+PyYAML==6.0.1
+psutil==5.9.8
+
+# Visualization & Graphing
+matplotlib==3.9.0
+seaborn==0.13.2
+plotly==5.22.0
+networkx==3.3
