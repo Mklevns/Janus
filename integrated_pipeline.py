@@ -216,7 +216,7 @@ class AdvancedJanusTrainer:
             'variables': self.variables,
             'max_depth': self.config.max_depth,
             'max_complexity': self.config.max_complexity,
-            'reward_config': reward_config
+            'reward_config': self.config.reward_config.model_dump() if self.config.reward_config else reward_config
         }
         
         # Create base environment
