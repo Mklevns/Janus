@@ -25,6 +25,8 @@ from symbolic_discovery_env import SymbolicDiscoveryEnv
 from hypothesis_policy_network import HypothesisNet, PPOTrainer
 from progressive_grammar_system import ProgressiveGrammar, Variable
 from enhanced_feedback import IntrinsicRewardCalculator, EnhancedObservationEncoder
+from math_utils import calculate_symbolic_accuracy
+import sympy as sp
 
 # Import our new components
 from physics_task_distribution import PhysicsTaskDistribution, PhysicsTask
@@ -667,17 +669,26 @@ class MAMLTrainer:
         return metrics
     
     def _expression_matches(self, expr: str, target: str, tol: float = 0.01) -> bool:
-        """Check if discovered expression matches target"""
-        # Simple string normalization
-        import re
-        
-        def normalize(s):
-            # Remove spaces and standardize operators
-            s = re.sub(r'\s+', '', s)
-            s = s.replace('**', '^')
-            return s
-        
-        return normalize(expr) == normalize(target)
+        """Check if discovered expression matches target using symbolic accuracy."""
+        if not expr or not target:
+            return False
+        try:
+            # Convert target string to a SymPy expression
+            # Assuming target is a single expression string.
+            target_expr = sp.sympify(target)
+            ground_truth_dict = {'true_law': target_expr}
+
+            # Calculate symbolic accuracy
+            accuracy = calculate_symbolic_accuracy(expr, ground_truth_dict)
+
+            # Check if accuracy is above the threshold
+            return accuracy > 0.99
+        except (sp.SympifyError, TypeError) as e:
+            # Log the error or handle it as appropriate
+            print(f"Error sympifying target expression: {target}. Error: {e}")
+            # If target cannot be parsed, we can't make a comparison.
+            # Depending on desired behavior, could return False or raise error.
+            return False
     
     def _log_task_performance(self, 
                             task: PhysicsTask,
