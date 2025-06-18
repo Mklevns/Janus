@@ -460,7 +460,7 @@ class MAMLTrainer:
         trajectories = []
         
         for episode in range(n_episodes):
-            obs = env.reset()
+            obs, _ = env.reset()
             trajectory = {
                 'observations': [],
                 'actions': [],
