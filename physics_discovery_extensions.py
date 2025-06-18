@@ -1,4 +1,3 @@
-# mklevns/janus/Mklevns-Janus-377dbdd2e196e36c324f61780a3b40b78803255b/physics_discovery_extensions.py
 """
 Physics Discovery Extensions for Progressive Grammar
 ===================================================
@@ -18,6 +17,15 @@ from sklearn.metrics import mean_squared_error
 import pickle
 from copy import deepcopy
 from progressive_grammar_system import Expression, Variable, ProgressiveGrammar
+from optimized_candidate_generation import OptimizedCandidateGenerator # Added
+import random # Added
+import psutil # Added
+import os # Added
+import time # Added
+import logging # Added
+import cProfile # Added
+import pstats # Added
+from io import StringIO # Added
 
 @dataclass
 class PhysicalLaw:
@@ -38,22 +46,32 @@ class ConservationDetector:
     def __init__(self, grammar: 'ProgressiveGrammar'):
         self.grammar = grammar
         self.tolerance = 1e-6
-        
+        # Initialize the optimized generator
+        self._optimizer = OptimizedCandidateGenerator(
+            self.grammar, 
+            enable_parallel=True,  # Use multiple cores
+            cache_size=10000      # Adjust based on available memory
+        )
+    
     def find_conserved_quantities(self, 
                                 trajectories: np.ndarray,
                                 variables: List['Variable'],
                                 max_complexity: int = 10) -> List[PhysicalLaw]:
         """
         Search for expressions that remain constant over trajectories.
-        Uses genetic programming with information-theoretic fitness.
+        Now uses optimized generation for massive speedup.
         """
         conserved_laws = []
         
-        # Generate candidate expressions
-        candidates = self._generate_candidates(variables, max_complexity)
+        # Use optimized generator instead of _generate_candidates
+        candidates = self._optimizer.generate_candidates(
+            variables, 
+            max_complexity,
+            fitness_threshold=0.5  # Optional: prune low-promise expressions
+        )
         
+        # Rest of the method remains the same
         for candidate in candidates:
-            # Evaluate conservation
             is_conserved, variance = self._test_conservation(
                 candidate, 
                 trajectories, 
@@ -72,62 +90,63 @@ class ConservationDetector:
         
         return conserved_laws
     
-    def _generate_candidates(self,
-                           variables: List['Variable'],
-                           max_complexity: int) -> List['Expression']:
-        """Generate candidate conservation expressions using grammar guidance."""
+    # Remove or comment out the old _generate_candidates method
+    # def _generate_candidates(self,
+    #                        variables: List['Variable'],
+    #                        max_complexity: int) -> List['Expression']:
+    #     """Generate candidate conservation expressions using grammar guidance."""
 
-        expressions_by_complexity: Dict[int, List['Expression']] = {1: []}
-        unique: Dict[str, 'Expression'] = {}
+    #     expressions_by_complexity: Dict[int, List['Expression']] = {1: []}
+    #     unique: Dict[str, 'Expression'] = {}
 
-        # Include variables and constants as base expressions
-        base_expressions: List['Expression'] = []
-        for var in variables:
-            expressions_by_complexity[1].append(var)
-            unique[str(var.symbolic)] = var
-            base_expressions.append(var)
+    #     # Include variables and constants as base expressions
+    #     base_expressions: List['Expression'] = []
+    #     for var in variables:
+    #         expressions_by_complexity[1].append(var)
+    #         unique[str(var.symbolic)] = var
+    #         base_expressions.append(var)
 
-        for c_val in self.grammar.primitives.get('constants', {}).values():
-            const_expr = self.grammar.create_expression('const', [c_val])
-            if const_expr and str(const_expr.symbolic) not in unique:
-                expressions_by_complexity[1].append(const_expr)
-                unique[str(const_expr.symbolic)] = const_expr
-                base_expressions.append(const_expr)
+    #     for c_val in self.grammar.primitives.get('constants', {}).values():
+    #         const_expr = self.grammar.create_expression('const', [c_val])
+    #         if const_expr and str(const_expr.symbolic) not in unique:
+    #             expressions_by_complexity[1].append(const_expr)
+    #             unique[str(const_expr.symbolic)] = const_expr
+    #             base_expressions.append(const_expr)
 
-        all_candidates = list(base_expressions)
+    #     all_candidates = list(base_expressions)
 
-        # Iteratively build more complex expressions
-        for complexity in range(2, max_complexity + 1):
-            level_candidates: List['Expression'] = []
+    #     # Iteratively build more complex expressions
+    #     for complexity in range(2, max_complexity + 1):
+    #         level_candidates: List['Expression'] = []
 
-            # Unary operations
-            for op in self.grammar.primitives.get('unary_ops', []):
-                for sub_c in range(1, complexity):
-                    for expr in expressions_by_complexity.get(sub_c, []):
-                        if expr.complexity + 1 == complexity:
-                            new_expr = self.grammar.create_expression(op, [expr])
-                            if new_expr and str(new_expr.symbolic) not in unique:
-                                unique[str(new_expr.symbolic)] = new_expr
-                                level_candidates.append(new_expr)
+    #         # Unary operations
+    #         for op in self.grammar.primitives.get('unary_ops', []):
+    #             for sub_c in range(1, complexity):
+    #                 for expr in expressions_by_complexity.get(sub_c, []):
+    #                     if expr.complexity + 1 == complexity:
+    #                         new_expr = self.grammar.create_expression(op, [expr])
+    #                         if new_expr and str(new_expr.symbolic) not in unique:
+    #                             unique[str(new_expr.symbolic)] = new_expr
+    #                             level_candidates.append(new_expr)
 
-            # Binary operations
-            for op in self.grammar.primitives.get('binary_ops', []):
-                for c1 in range(1, complexity):
-                    c2 = complexity - 1 - c1
-                    if c2 < 1:
-                        continue
-                    for expr1 in expressions_by_complexity.get(c1, []):
-                        for expr2 in expressions_by_complexity.get(c2, []):
-                            new_expr = self.grammar.create_expression(op, [expr1, expr2])
-                            if new_expr and str(new_expr.symbolic) not in unique:
-                                unique[str(new_expr.symbolic)] = new_expr
-                                level_candidates.append(new_expr)
+    #         # Binary operations
+    #         for op in self.grammar.primitives.get('binary_ops', []):
+    #             for c1 in range(1, complexity):
+    #                 c2 = complexity - 1 - c1
+    #                 if c2 < 1:
+    #                     continue
+    #                 for expr1 in expressions_by_complexity.get(c1, []):
+    #                     for expr2 in expressions_by_complexity.get(c2, []):
+    #                         new_expr = self.grammar.create_expression(op, [expr1, expr2])
+    #                         if new_expr and str(new_expr.symbolic) not in unique:
+    #                             unique[str(new_expr.symbolic)] = new_expr
+    #                             level_candidates.append(new_expr)
 
-            if level_candidates:
-                expressions_by_complexity[complexity] = level_candidates
-                all_candidates.extend(level_candidates)
+    #         if level_candidates:
+    #             expressions_by_complexity[complexity] = level_candidates
+    #             all_candidates.extend(level_candidates)
 
-        return all_candidates
+    #     return all_candidates
     
     def _test_conservation(self,
                          expression: 'Expression',
@@ -192,27 +211,36 @@ class ConservationDetector:
 
 
 class SymbolicRegressor:
-    """Performs symbolic regression to fit data to mathematical expressions."""
+    """Symbolic regression for discovering equations of motion."""
     
-    def __init__(self, grammar: 'ProgressiveGrammar'):
+    def __init__(self, grammar: 'ProgressiveGrammar', **kwargs):
         self.grammar = grammar
-        self.population_size = 100
-        self.generations = 50
-        self.mutation_rate = 0.1
-        self.crossover_rate = 0.7
+        self.population_size = kwargs.get('population_size', 100)
+        self.generations = kwargs.get('generations', 50)
+        self.max_complexity = kwargs.get('max_complexity', 10)
+        self.mutation_rate = kwargs.get('mutation_rate', 0.1) # Keep existing or allow override
+        self.crossover_rate = kwargs.get('crossover_rate', 0.7) # Keep existing or allow override
         
+        # Use optimized generator
+        self._optimizer = OptimizedCandidateGenerator(
+            self.grammar, # grammar was self.grammar
+            enable_parallel=True
+        )
+    
     def fit(self,
            X: np.ndarray,
            y: np.ndarray,
-           variables: List['Variable'],
-           max_complexity: int = 15) -> 'Expression':
+           variables: List['Variable'], # variables was var_mapping, this is the original signature
+           max_complexity: int = 15) -> 'Expression': # max_complexity was part of **fit_params
         """
         Fit data using genetic programming for symbolic regression.
         X: input data (n_samples, n_features)
         y: target values (n_samples,)
         """
         # Initialize population
-        population = self._initialize_population(variables, max_complexity)
+        # The _initialize_population in the issue description uses self.max_complexity (from __init__)
+        # not the max_complexity passed to fit. Sticking to issue description.
+        population = self._initialize_population(variables) 
         
         for generation in range(self.generations):
             # Evaluate fitness
@@ -232,7 +260,6 @@ class SymbolicRegressor:
                     # Crossover
                     parent1 = np.random.choice(selected)
                     parent2 = np.random.choice(selected)
-                    # _crossover now returns two children
                     child1, child2 = self._crossover(parent1, parent2)
 
                     children_to_process = []
@@ -241,26 +268,23 @@ class SymbolicRegressor:
                     if child2:
                         children_to_process.append(child2)
                 else:
-                    # Direct reproduction
-                    # Create a list to have a consistent processing path
                     children_to_process = [np.random.choice(selected)]
                 
                 for child_candidate in children_to_process:
                     if len(next_population) >= self.population_size:
-                        break # Stop if population is full
+                        break
 
-                    mutated_child = child_candidate # Initialize with the candidate
-                    # Mutation
+                    mutated_child = child_candidate 
                     if np.random.random() < self.mutation_rate:
-                        # _mutate returns a new mutated expression or the original if mutation failed
                         mutated_child = self._mutate(child_candidate, variables)
 
-                    if mutated_child and mutated_child.complexity <= max_complexity:
+                    # The max_complexity for filtering here should be the one from __init__
+                    # to be consistent with _initialize_population.
+                    if mutated_child and mutated_child.complexity <= self.max_complexity:
                         next_population.append(mutated_child)
             
             population = next_population
         
-        # Return best expression
         final_fitness = [
             self._evaluate_fitness(expr, X, y, variables) 
             for expr in population
@@ -268,22 +292,29 @@ class SymbolicRegressor:
         best_idx = np.argmax(final_fitness)
         
         return population[best_idx]
-    
-    def _initialize_population(self,
-                             variables: List['Variable'],
-                             max_complexity: int) -> List['Expression']:
-        """Initialize random population of expressions."""
-        population = []
+
+    def _initialize_population(self, variables: List['Variable']) -> List['Expression']:
+        """Initialize population with optimized generation."""
+        # Generate diverse initial population efficiently
+        all_candidates = self._optimizer.generate_candidates(
+            variables, 
+            max_complexity=5,  # Start with simpler expressions
+            fitness_threshold=None  # Keep all for diversity
+        )
         
-        # Add simple expressions
-        for var in variables:
-            population.append(var)
-        
-        # Generate random expressions
-        while len(population) < self.population_size:
-            expr = self._random_expression(variables, max_complexity)
-            if expr:
-                population.append(expr)
+        # Sample if we have too many
+        if len(all_candidates) > self.population_size:
+            # import random # Already imported at the top
+            population = random.sample(all_candidates, self.population_size)
+        else:
+            population = all_candidates
+            
+            # Fill remaining slots with mutations
+            while len(population) < self.population_size and population: # Add check for non-empty population before random.choice
+                parent = random.choice(population)
+                mutated = self._mutate(parent, variables) # Pass variables to mutate
+                if mutated:
+                    population.append(mutated)
         
         return population
     
@@ -301,7 +332,6 @@ class SymbolicRegressor:
                     [np.random.randn()]
                 )
         
-        # Choose operator
         op_type = np.random.choice(['binary', 'unary'])
         
         if op_type == 'binary':
@@ -327,54 +357,42 @@ class SymbolicRegressor:
         
         predictions = []
         
-        # 1) Build predictions, bailing out if any evaluation fails
         for i in range(X.shape[0]):
-            # Create substitution dictionary
             subs = {
-                var.symbolic: X[i, var.index]
+                var.symbolic: X[i, var.index] 
                 for var in variables
             }
             try:
-                # evaluate and coerce to float
                 pred = float(expression.symbolic.subs(subs))
             except Exception:
-                # invalid expression (e.g. domain error)
                 return -float('inf')
             predictions.append(pred)
         
-        # 2) Convert to array and guard against NaNs
         preds = np.array(predictions, dtype=float)
         if np.isnan(preds).any():
             return -float('inf')
         
-        # 3) Compute MSE; guard against unexpected errors
         try:
             mse = mean_squared_error(y, preds)
         except Exception:
             return -float('inf')
         
-        # 4) Complexity penalty
         complexity_penalty = 0.01 * expression.complexity
-        
-        # 5) Return fitness (higher is better, so negative MSE minus penalty)
         return -mse - complexity_penalty
     
     def _tournament_selection(self,
                             population: List['Expression'],
                             fitness_scores: List[float],
                             tournament_size: int = 3) -> List['Expression']:
-        """Tournament selection for genetic algorithm."""
         selected = []
         
         for _ in range(len(population)):
-            # Random tournament
             indices = np.random.choice(
                 len(population), 
                 tournament_size, 
                 replace=False
             )
             
-            # Select best from tournament
             tournament_fitness = [fitness_scores[i] for i in indices]
             winner_idx = indices[np.argmax(tournament_fitness)]
             selected.append(population[winner_idx])
@@ -382,7 +400,6 @@ class SymbolicRegressor:
         return selected
 
     def _get_all_subexpressions(self, expression: 'Expression') -> List['Expression']:
-        """Recursively collect all subexpressions from an expression tree."""
         nodes = []
         if isinstance(expression, Expression):
             nodes.append(expression)
@@ -393,28 +410,18 @@ class SymbolicRegressor:
     def _crossover(self,
                   parent1: 'Expression',
                   parent2: 'Expression') -> Tuple[Optional['Expression'], Optional['Expression']]:
-        """Crossover two expressions by swapping subtrees."""
-        # Make copies to avoid modifying the original parents
         p1_copy = pickle.loads(pickle.dumps(parent1))
         p2_copy = pickle.loads(pickle.dumps(parent2))
 
-        # Get all possible crossover points (subexpressions)
         p1_nodes = self._get_all_subexpressions(p1_copy)
         p2_nodes = self._get_all_subexpressions(p2_copy)
 
         if not p1_nodes or not p2_nodes:
-            # If crossover is not possible (e.g., one parent is a terminal),
-            # return copies of the original parents.
             return p1_copy, p2_copy
 
-        # Select random subtrees to swap
-        # Ensure that we are selecting actual subexpressions, not terminals if they cannot be swapped meaningfully.
-        # For simplicity, we assume _get_all_subexpressions returns swappable nodes.
         crossover_point1 = np.random.choice(p1_nodes)
         crossover_point2 = np.random.choice(p2_nodes)
 
-        # Swap the operator and operands attributes of the selected nodes.
-        # This effectively swaps the subtrees rooted at these nodes.
         crossover_point1.operator, crossover_point2.operator = (
             crossover_point2.operator,
             crossover_point1.operator,
@@ -424,13 +431,11 @@ class SymbolicRegressor:
             crossover_point1.operands,
         )
 
-        # Call __post_init__ on the modified crossover points first
         if hasattr(crossover_point1, '__post_init__'):
             crossover_point1.__post_init__()
         if hasattr(crossover_point2, '__post_init__'):
             crossover_point2.__post_init__()
 
-        # Recalculate complexity and symbolic form for both modified expressions
         p1_copy.__post_init__()
         p2_copy.__post_init__()
 
@@ -439,22 +444,17 @@ class SymbolicRegressor:
     def _mutate(self,
                expression: 'Expression',
                variables: List['Variable']) -> 'Expression':
-        """Mutate an expression by modifying a random node."""
         expr_copy = pickle.loads(pickle.dumps(expression))
         nodes = self._get_all_subexpressions(expr_copy)
 
         if not nodes:
             return expr_copy
 
-        # Select a random node to mutate
         node_to_mutate = np.random.choice(nodes)
-
-        # Apply a random mutation
         mutation_type = np.random.choice(['operator', 'operand'])
 
         if mutation_type == 'operator' and node_to_mutate.operator not in ['var', 'const']:
             all_ops = list(self.grammar.primitives['binary_ops'] | self.grammar.primitives['unary_ops'])
-            # Ensure arity matches
             current_arity = len(node_to_mutate.operands)
             possible_new_ops = [
                 op
@@ -470,18 +470,167 @@ class SymbolicRegressor:
                 node_to_mutate.operator = np.random.choice(possible_new_ops)
 
         elif mutation_type == 'operand' and node_to_mutate.operands:
-            if node_to_mutate.operator == 'const':
-                # If it's a const node, only replace its value with another number.
+            # This logic for 'const' was in the original, keeping it.
+            # The issue description's _initialize_population (which calls _mutate)
+            # doesn't seem to create 'const' type Expressions that would flow here.
+            # However, _random_expression can create 'const' expressions.
+            if node_to_mutate.operator == 'const': 
                 node_to_mutate.operands[0] = np.random.randn()
             else:
                 op_idx = np.random.randint(0, len(node_to_mutate.operands))
-                # Replace an operand with a new random terminal (variable or constant)
                 if np.random.random() < 0.5:
                     node_to_mutate.operands[op_idx] = np.random.choice(variables)
                 else:
+                    # Create a new 'const' expression for the operand
+                    # const_val = np.random.randn()
+                    # Assuming ProgressiveGrammar has a way to make a simple constant expression
+                    # Or, if operands can be raw values for 'const' type, this might be simpler.
+                    # For now, directly assigning the value, assuming it's handled by __post_init__
+                    # or that operands can be basic types for some operators.
+                    # The original _mutate had `np.random.randn()`, which is a float, not an Expression.
+                    # Reverting to the simpler form from original _mutate:
                     node_to_mutate.operands[op_idx] = np.random.randn()
 
-        # Recalculate properties
-        expr_copy.__post_init__()
 
+        expr_copy.__post_init__()
         return expr_copy
+
+# --- New functions and classes to be added ---
+
+def get_memory_usage_mb():
+    """Get current memory usage in MB."""
+    # import psutil # Already imported
+    # import os # Already imported
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
+def monitor_generation_performance(detector: ConservationDetector, 
+                                 variables: List['Variable'],
+                                 max_complexity: int):
+    """Monitor and log generation performance."""
+    # import time # Already imported
+    # import logging # Already imported
+    
+    logger = logging.getLogger(__name__)
+    
+    start_time = time.time()
+    start_memory = get_memory_usage_mb()
+    
+    # Run generation
+    # Accessing _optimizer directly as per the issue description
+    candidates = detector._optimizer.generate_candidates(
+        variables, max_complexity
+    )
+    
+    elapsed = time.time() - start_time
+    memory_used = get_memory_usage_mb() - start_memory
+    
+    # Log performance metrics
+    logger.info(f"Candidate generation completed:")
+    logger.info(f"  - Time: {elapsed:.2f}s")
+    logger.info(f"  - Candidates: {len(candidates)}")
+    if elapsed > 0: # Avoid division by zero
+        logger.info(f"  - Rate: {len(candidates)/elapsed:.1f} expr/s")
+    else:
+        logger.info(f"  - Rate: N/A (elapsed time was zero)")
+    logger.info(f"  - Memory: {memory_used:.1f} MB")
+    
+    # Log complexity distribution
+    complexity_dist = {}
+    for expr in candidates:
+        c = expr.complexity
+        complexity_dist[c] = complexity_dist.get(c, 0) + 1
+    
+    logger.info(f"  - Distribution: {complexity_dist}")
+    
+    return candidates
+
+class GenerationProfiles:
+    """Pre-configured generation profiles for different scenarios."""
+    
+    @staticmethod
+    def fast_exploration():
+        """Fast exploration for interactive use."""
+        return {
+            'enable_parallel': False,  # Avoid overhead for small problems
+            'beam_width': 100,
+            'max_combinations_per_level': 50,
+            'cache_size': 1000
+        }
+    
+    @staticmethod
+    def thorough_search():
+        """Thorough search for batch processing."""
+        return {
+            'enable_parallel': True,
+            'beam_width': 5000,
+            'max_combinations_per_level': 500,
+            'cache_size': 50000
+        }
+    
+    @staticmethod
+    def memory_constrained():
+        """For systems with limited memory."""
+        return {
+            'enable_parallel': False,
+            'beam_width': 500,
+            'max_combinations_per_level': 100,
+            'cache_size': 5000
+        }
+
+def create_optimized_detector(profile='balanced', grammar: Optional[ProgressiveGrammar] = None) -> ConservationDetector: # Added grammar argument
+    """Create detector with optimized generation."""
+    # grammar = ProgressiveGrammar() # Use passed grammar or create new
+    if grammar is None:
+        grammar = ProgressiveGrammar() # type: ignore
+    
+    # Select profile
+    if profile == 'fast':
+        config = GenerationProfiles.fast_exploration()
+    elif profile == 'thorough':
+        config = GenerationProfiles.thorough_search()
+    elif profile == 'memory':
+        config = GenerationProfiles.memory_constrained()
+    else:  # balanced
+        config = {
+            'enable_parallel': True,
+            'beam_width': 1000,
+            'cache_size': 10000
+        }
+    
+    # Create optimized generator
+    optimizer = OptimizedCandidateGenerator(grammar, **config) # type: ignore
+    
+    # Create detector
+    detector = ConservationDetector(grammar) # type: ignore
+    detector._optimizer = optimizer # type: ignore
+    
+    return detector
+
+
+def profile_generation(detector: ConservationDetector, variables: List['Variable'], max_complexity: int):
+    """Profile the generation process."""
+    # import cProfile # Already imported
+    # import pstats # Already imported
+    # from io import StringIO # Already imported
+    
+    profiler = cProfile.Profile()
+    
+    # Profile the generation
+    profiler.enable()
+    # Accessing _optimizer directly as per the issue description
+    candidates = detector._optimizer.generate_candidates(
+        variables, max_complexity
+    )
+    profiler.disable()
+    
+    # Get statistics
+    s = StringIO()
+    ps = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
+    ps.print_stats(20)  # Top 20 functions
+    
+    print(f"\nGenerated {len(candidates)} candidates")
+    print("\nTop time-consuming functions:")
+    print(s.getvalue())
+    
+    return candidates
