@@ -683,3 +683,353 @@ if __name__ == "__main__":
         # Test calculus operations
         derivative = grammar.create_expression('diff', [expr1, v1])
         print(f"\nDerivative of expr1 w.r.t {v1.name}: {derivative.symbolic}")
+
+
+class AIGrammar(ProgressiveGrammar):
+    def __init__(self):
+        super().__init__(load_defaults=False) # Assuming AI grammar might not need all default physics ops
+
+        # Neural network primitives
+        # For 'activation', these are values, not ops in the traditional sense.
+        # Consider how they integrate. For now, adding as a list.
+        self.add_primitive_set('activation_types', ['relu', 'sigmoid', 'tanh', 'gelu'])
+
+        # These will be functional primitives.
+        # Their evaluation will require specific logic, possibly outside direct sympy conversion.
+        self.add_primitive('attention', self._attention_op)
+        self.add_primitive('embedding_lookup', self._embedding_op)
+
+        # Logical primitives
+        self.add_primitive('if_then_else', lambda cond, true_val, false_val:
+                          true_val if cond else false_val)
+        self.add_primitive('threshold', lambda x, t: x > t) # x > t returns boolean
+
+        # Aggregation primitives
+        self.add_primitive('weighted_sum', lambda weights, values:
+                          sum(w*v for w,v in zip(weights, values)))
+        self.add_primitive('max_pool', lambda values: max(values) if values else None) # Handle empty list
+
+    def add_primitive_set(self, name: str, values: List[str]):
+        """Adds a named set of primitive values."""
+        if 'custom_sets' not in self.primitives:
+            self.primitives['custom_sets'] = {}
+        self.primitives['custom_sets'][name] = values
+
+    def add_primitive(self, name: str, func_or_values: Any, category: Optional[str] = None):
+        """
+        Adds a primitive. If func_or_values is callable, it's treated as an operator.
+        Otherwise, it could be a list of values for a specific category.
+        The 'category' argument helps classify operators for arity, validation etc.
+        """
+        if callable(func_or_values):
+            # Determine category if not provided, or use a default like 'custom_callable'
+            # This part needs refinement based on how these ops are used (unary, binary, etc.)
+            # For now, let's assume they might be custom and need special handling in validation/evaluation.
+            cat = category if category else 'custom_callable_ops'
+            if cat not in self.primitives:
+                self.primitives[cat] = {}
+            self.primitives[cat][name] = func_or_values
+        else:
+            # This path is less clear for the new primitives.
+            # 'activation' seems like a set of types, not a single primitive operator.
+            # Handled by add_primitive_set for 'activation_types'.
+            # For other cases, this might store lists of constants or specific values.
+            # For now, focusing on callable primitives.
+            # If 'name' is e.g. 'activation_function_types' and values are ['relu', 'sigmoid']
+            if isinstance(func_or_values, list):
+                if 'named_lists' not in self.primitives:
+                    self.primitives['named_lists'] = {}
+                self.primitives['named_lists'][name] = func_or_values
+            else:
+                # Fallback for single non-callable value, similar to constants
+                if 'custom_values' not in self.primitives:
+                    self.primitives['custom_values'] = {}
+                self.primitives['custom_values'][name] = func_or_values
+
+
+    def _attention_op(self, query: Any, key: Any, value: Any) -> Any:
+        """Placeholder for attention mechanism operation."""
+        # In a real scenario, this would involve complex tensor operations.
+        # For symbolic representation, it might become a named function.
+        # e.g., Attention(Q, K, V)
+        print(f"Warning: _attention_op is a placeholder. Query: {query}, Key: {key}, Value: {value}")
+        # raise NotImplementedError("Attention operation is not implemented symbolically yet.")
+        return f"Attention({query}, {key}, {value})" # Placeholder symbolic string
+
+    def _embedding_op(self, indices: Any, embedding_matrix: Any) -> Any:
+        """Placeholder for embedding lookup operation."""
+        # e.g., EmbeddingLookup(indices, matrix_name)
+        print(f"Warning: _embedding_op is a placeholder. Indices: {indices}, Matrix: {embedding_matrix}")
+        # raise NotImplementedError("Embedding lookup is not implemented symbolically yet.")
+        return f"EmbeddingLookup({indices}, {embedding_matrix})" # Placeholder symbolic string
+
+    def _to_sympy(self, expr_node: Expression) -> sp.Expr: # Overriding to handle new ops
+        """
+        Converts an Expression node to its Sympy representation.
+        Extends base class method to handle AI-specific primitives.
+        """
+        # Custom callable ops (like if_then_else, threshold, etc.)
+        # These might not have direct Sympy equivalents or might be represented as Functions.
+        if expr_node.operator in self.primitives.get('custom_callable_ops', {}):
+            # For now, represent them as named Sympy functions.
+            # Their actual evaluation would happen outside Sympy, during numerical simulation.
+            func_name = expr_node.operator
+
+            # Recursively convert operands to Sympy expressions
+            sympy_operands = []
+            for op in expr_node.operands:
+                if isinstance(op, Expression):
+                    sympy_operands.append(self._to_sympy(op))
+                elif isinstance(op, Variable):
+                    sympy_operands.append(op.symbolic)
+                elif isinstance(op, (int, float)):
+                    sympy_operands.append(sp.Number(op))
+                elif isinstance(op, str): # Could be a string literal or symbolic name
+                    sympy_operands.append(sp.Symbol(op)) # Treat as symbol if string
+                else: # Fallback for unknown operand types
+                    sympy_operands.append(sp.Symbol(str(op)))
+
+            # Handle specific lambda functions for more precise Sympy representation if possible
+            if func_name == 'if_then_else' and len(sympy_operands) == 3:
+                # Sympy's Piecewise can represent if-then-else
+                # Piecewise((true_expr, cond_expr), (false_expr, True))
+                # This assumes cond_expr evaluates to a boolean in Sympy context.
+                # The lambda `cond` is a boolean, `true_val` and `false_val` are values.
+                # This is tricky because the lambda is evaluated by Python, not Sympy directly.
+                # For symbolic representation, we might need to create a Sympy Function.
+                 return sp.Function(func_name)(*sympy_operands) # Default to Function for now
+
+            elif func_name == 'threshold' and len(sympy_operands) == 2:
+                # x > t  (returns boolean)
+                # Sympy can represent this directly as a relational expression
+                return sympy_operands[0] > sympy_operands[1]
+
+            # For others like weighted_sum, max_pool, attention, embedding_lookup:
+            # These are complex operations. Representing them as opaque Sympy Functions.
+            return sp.Function(func_name)(*sympy_operands)
+
+        # For activation types like 'relu', 'sigmoid' - these are not operators in Expression
+        # They are typically applied to an expression. e.g. relu(expr).
+        # If they are used as operators in an Expression e.g. Expression('relu', [operand_expr]),
+        # then they should be in 'unary_ops' or similar.
+        # The current AIGrammar setup adds 'activation_types' as a list of strings.
+        # If an expression like `Expression('relu', [sub_expr])` is formed,
+        # `_validate_expression` and `_to_sympy` need to know 'relu' is a valid unary op.
+        # For now, assuming 'relu' etc. might be added to 'unary_ops' if used this way.
+
+        # Fallback to parent's _to_sympy for standard operators
+        # Need to ensure the Expression object is passed, not self.
+        # The original _to_sympy in Expression class is `expr_node._to_sympy()`
+        # The method signature in ProgressiveGrammar is `_to_sympy(self) -> sp.Expr` for an Expression instance.
+        # This needs to be consistent. Let's assume we are working with an Expression instance `expr_node`.
+
+        # If this AIGrammar._to_sympy is called on an Expression instance, it should be:
+        # return super(AIGrammar, type(expr_node))._to_sympy(expr_node) # If AIGrammar is not an Expression subclass
+        # However, ProgressiveGrammar.create_expression returns Expression instances.
+        # Expression._to_sympy is the primary method.
+        # This override implies AIGrammar itself might be an Expression or it's a utility method.
+        # Given the context, it's likely that an Expression object `expr_node` is passed,
+        # and this method is part of AIGrammar to customize its conversion.
+
+        # The original `Expression._to_sympy` is what we'd call:
+        # Let's assume this method is intended to be part of the Expression class logic
+        # when the grammar is AIGrammar. This is architecturally complex.
+        # A simpler way: ProgressiveGrammar.create_expression creates Expression objects.
+        # Expression._to_sympy should be enhanced or AIGrammar should provide a dedicated
+        # conversion utility that it uses.
+
+        # For now, let's assume this method is called with an Expression `expr_node`
+        # and if the operator is not custom, it defers to the standard Expression._to_sympy logic.
+        # This requires `expr_node` to have access to its original `_to_sympy` if this one doesn't handle it.
+        # This is problematic.
+
+        # Alternative: AIGrammar's `create_expression` returns a specialized AIExpression(Expression)
+        # which has its own `_to_sympy`.
+        # Or, `Expression._to_sympy` itself becomes aware of the grammar context.
+
+        # Safest assumption: if an operator is not custom AI, it's handled by base Expression logic.
+        # This means this method should only handle *new* AI operators.
+        # The `Expression` class's `_to_sympy` method would need to be able to call out to the
+        # grammar system for custom types, or this logic needs to be merged/refactored.
+
+        # Let's assume this is a helper, and the main call is still `Expression.symbolic` which calls `Expression._to_sympy`.
+        # `Expression._to_sympy` would need to be modified to consult the grammar for these.
+
+        # For the purpose of this step, we are modifying AIGrammar.
+        # If Expression._to_sympy is called, and it encounters an op like 'if_then_else',
+        # it needs to know how to handle it.
+        # This suggests `Expression._to_sympy` should be modified, or it should delegate to the grammar.
+
+        # Let's assume this method *replaces* the logic for AI specific ops if called.
+        # The base ProgressiveGrammar does not have _to_sympy. Expression class does.
+        # This method is incorrectly placed if it's meant to override Expression._to_sympy.
+
+        # Re-evaluating: The `Expression` class has `_to_sympy`.
+        # `AIGrammar` should not have its own `_to_sympy` with this signature unless `AIGrammar` instances are `Expression`s.
+        # The change should ideally be within `Expression._to_sympy` to make it grammar-aware,
+        # or `AIGrammar` provides lookup for these custom functions that `Expression._to_sympy` can use.
+
+        # Sticking to the plan of modifying AIGrammar:
+        # This method implies it's a utility FOR Expression, or it's a misinterpretation of where to put it.
+        # If it's a utility:
+        # def convert_ai_expression_to_sympy(self, expr_node: Expression) -> sp.Expr:
+        # ... then Expression._to_sympy would call this.
+
+        # For now, let's assume this is the intended override path, and Expression class will be modified
+        # to call `grammar_instance.convert_expression_to_sympy(self)` if a grammar is associated.
+        # This is a larger architectural change.
+
+        # Simplification: The `Expression` class itself should be made extensible or grammar-aware.
+        # Adding this method to `AIGrammar` means it's a helper.
+        # Let's proceed with the definition here, and acknowledge that `Expression._to_sympy`
+        # would need to be modified to use this.
+
+        # If the operator is not one of the custom AI ones, it should defer to the base implementation.
+        # However, ProgressiveGrammar doesn't have _to_sympy. Expression class does.
+        # This method cannot `super()._to_sympy()` if AIGrammar is not an Expression.
+        # This indicates a structural issue with the request vs. codebase.
+
+        # Let's assume this method is intended to be ADDED to the Expression class,
+        # or the Expression class's _to_sympy is MODIFIED.
+        # Since the task is to modify AIGrammar, this method's role is likely a helper or a policy.
+
+        # For now, if it's not a custom op, this specific method shouldn't handle it.
+        # It should only define behavior for *new* ops.
+        # The original Expression._to_sympy will handle the rest.
+        # This means Expression._to_sympy needs to be modified to call:
+        # `if self.operator in current_grammar.get_custom_ai_ops(): return current_grammar.custom_ai_op_to_sympy(self)`
+
+        # Given the file is `progressive_grammar_system.py`, and this is `AIGrammar`,
+        # this method defines *how* AIGrammar would want these ops converted.
+        # The `Expression` class would be the one to *use* this definition.
+
+        # So, this method is more of a policy/handler lookup for Expression.
+        # It should not call super()._to_sympy(). It should raise error if op unknown to it.
+        raise NotImplementedError(f"Operator '{expr_node.operator}' not handled by AIGrammar._to_sympy policy.")
+
+
+    def _validate_expression(self, operator: str, operands: List[Any]) -> bool: # Overriding
+        """
+        Validate syntactic correctness of expression, extended for AI primitives.
+        """
+        # Handle AI custom callable operators
+        if operator in self.primitives.get('custom_callable_ops', {}):
+            # Basic validation: check if operator is known
+            # Arity checks would be specific to each custom op.
+            # Example: 'if_then_else' needs 3 operands, 'threshold' needs 2.
+            # This needs to be made more robust, perhaps by storing arity with primitives.
+            if operator == 'if_then_else':
+                if len(operands) != 3: return False
+                # Further type checks: cond (bool), true_val, false_val (any type)
+            elif operator == 'threshold':
+                if len(operands) != 2: return False
+                # Further type checks: x (numeric), t (numeric)
+            elif operator == 'weighted_sum':
+                if len(operands) != 2: return False # weights_list, values_list
+            elif operator == 'max_pool':
+                if len(operands) != 1: return False # values_list
+            elif operator == 'attention': # Q, K, V
+                if len(operands) != 3: return False
+            elif operator == 'embedding_lookup': # indices, matrix
+                if len(operands) != 2: return False
+            # Assume valid if basic arity (if checked) passes. More detailed type checking can be added.
+            return True
+
+        # Handle activation functions if they are treated as operators (e.g., unary)
+        # If 'relu' is in `self.primitives['unary_ops']` (added by user or a setup method)
+        # then super()._validate_expression should handle it.
+        # The current AIGrammar adds 'activation_types' as a list of strings,
+        # not as operators. If they become operators, they need to be added to unary_ops etc.
+        # e.g., self.primitives['unary_ops'].update(self.primitives['custom_sets']['activation_types'])
+        # For now, assuming they are not operators in this validation path.
+
+        return super()._validate_expression(operator, operands)
+
+    # Note: _expression_key might also need overriding if these new operators
+    # have specific canonicalization needs (e.g., commutativity, though unlikely for these).
+    # For now, the base class key generation using operator name and sorted operands (if commutative)
+    # might suffice, assuming these new ops are not commutative.
+    # If `if_then_else(cond, A, B)` is different from `if_then_else(cond, B, A)`, standard keying is fine.
+
+    # The Expression class's _to_sympy method will need to be modified to correctly
+    # use the AIGrammar's policies for converting these new primitives to Sympy forms.
+    # This current implementation of AIGrammar._to_sympy is a *policy* that Expression._to_sympy could use.
+    # It's not a direct override of Expression._to_sympy.
+
+# Example usage for AIGrammar (illustrative)
+if __name__ == "__main__":
+    # Existing example code from ProgressiveGrammar...
+    grammar = ProgressiveGrammar()
+    # ... (rest of the ProgressiveGrammar example)
+
+    print("\n--- AIGrammar Example ---")
+    ai_grammar = AIGrammar()
+
+    # Example: Using a variable (assuming it's discovered or defined)
+    # For AIGrammar, variables might represent tensor shapes, features, etc.
+    # Let's create dummy variables for illustration.
+    q_var = Variable(name="query_tensor", index=0)
+    k_var = Variable(name="key_tensor", index=1)
+    v_var = Variable(name="value_tensor", index=2)
+    feature_x = Variable(name="feature_x", index=3)
+    threshold_val = Variable(name="threshold_const", index=4) # Or could be a const
+
+    ai_grammar.variables = {
+        "query_tensor": q_var, "key_tensor": k_var, "value_tensor": v_var,
+        "feature_x": feature_x, "threshold_const": threshold_val
+    }
+    # Manually add 'relu' to unary ops for testing if it's used like `relu(x)`
+    if 'unary_ops' not in ai_grammar.primitives: ai_grammar.primitives['unary_ops'] = set()
+    ai_grammar.primitives['unary_ops'].add('relu') # Assume 'relu' is a known unary op
+
+
+    # Test creating an expression with a new AI primitive
+    # Note: The Expression class's _to_sympy would need to be aware of AIGrammar's policies.
+    # This example shows creation; symbolic conversion needs Expression class changes.
+
+    # 1. Threshold expression
+    # threshold_expr_ai = ai_grammar.create_expression('threshold', [feature_x, threshold_val])
+    # if threshold_expr_ai:
+    #     print(f"AI Threshold Expr: {threshold_expr_ai.operator}({feature_x.name}, {threshold_val.name})")
+    #     # To print symbolic: threshold_expr_ai.symbolic (requires Expression class to use AIGrammar's policy)
+    #     # This will likely fail or give 'Unknown(threshold)' if Expression._to_sympy is not updated.
+    #     # print(f"Symbolic (requires Expression update): {threshold_expr_ai.symbolic}")
+    # else:
+    #     print("Failed to create AI threshold expression.")
+
+    # Illustrative: If Expression._to_sympy was modified to use AIGrammar's policy:
+    # Assuming Expression class is modified like:
+    # class Expression:
+    #   ...
+    #   def _to_sympy(self):
+    #     if self.operator in grammar.primitives.get('custom_callable_ops',{}):
+    #        return grammar._to_sympy(self) # Call grammar's policy for this expression node
+    #     ... (original logic) ...
+
+    # For now, the direct .symbolic call on Expression objects created with AIGrammar
+    # for new AI ops will not work as intended without modifying Expression class.
+    # The AIGrammar._to_sympy here defines *how* it should be done.
+
+    # Let's test validation path
+    print("\nTesting validation for AIGrammar:")
+    valid_threshold = ai_grammar._validate_expression('threshold', [feature_x, 0.5])
+    print(f"Validation for 'threshold' (2 operands): {valid_threshold}")
+    invalid_threshold = ai_grammar._validate_expression('threshold', [feature_x])
+    print(f"Validation for 'threshold' (1 operand): {invalid_threshold}")
+
+    valid_attention = ai_grammar._validate_expression('attention', [q_var, k_var, v_var])
+    print(f"Validation for 'attention' (3 operands): {valid_attention}")
+
+    # Example of creating an expression that might use a traditional op via superclass validation
+    # This assumes 'relu' was added to unary_ops for AIGrammar for this test.
+    # relu_expr_ai = ai_grammar.create_expression('relu', [feature_x])
+    # if relu_expr_ai:
+    #    print(f"AI Relu Expr: {relu_expr_ai.operator}({feature_x.name})")
+    #    # print(f"Symbolic (should work if relu is standard unary): {relu_expr_ai.symbolic}")
+    # else:
+    #    print("Failed to create AI relu expression.")
+
+    # The main challenge remains: Expression class is independent of grammar object at instance level.
+    # Making Expression operations (like .symbolic, .complexity, validation) grammar-aware
+    # is a deeper refactoring. This AIGrammar class adds the *definitions* and *policies*
+    # for AI primitives.
