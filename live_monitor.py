@@ -1,408 +1,394 @@
-"""
-Live Training Monitor for Janus
-===============================
-
-Real-time dashboard to monitor and analyze your training progress.
-Run this in a separate terminal while training.
-"""
-
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+# live_monitor_fix.py
 import json
 import time
-from pathlib import Path
+import threading
 from collections import deque
-from datetime import datetime
-import re
+from typing import List, Dict, Any, Optional, Union
+import os
+import weakref
+import numpy as np # Added for example usage
+
+# Attempt to import plotting libraries, but make them optional
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+    _MPL_AVAILABLE = True
+except ImportError:
+    _MPL_AVAILABLE = False
+    # print("Warning: Matplotlib not found. Live plotting will be disabled.")
+
+# Attempt to import Redis client, make it optional
+try:
+    import redis
+    _REDIS_AVAILABLE = True
+except ImportError:
+    _REDIS_AVAILABLE = False
+    # print("Warning: Redis-py not found. Redis backend for logging will be disabled.")
 
 
-class JanusLiveMonitor:
-    """Live monitoring dashboard for Janus training."""
-    
-    def __init__(self, 
-                 results_dir: str = "./results",
-                 checkpoint_dir: str = "./checkpoints",
-                 update_interval: int = 5000):  # ms
+class TrainingLogger:
+    _instances = weakref.WeakSet()
+
+    def __init__(self,
+                 backends: List[str] = ["file", "memory"],
+                 log_file_path: str = "janus_training_log.jsonl",
+                 redis_host: str = 'localhost',
+                 redis_port: int = 6379,
+                 redis_channel: str = 'janus_training_metrics',
+                 max_memory_len: int = 10000):
+
+        self.backends = [b.lower() for b in backends]
+        self.log_file_path = log_file_path
+        self.max_memory_len = max_memory_len
+
+        self.memory_logs: deque = deque(maxlen=self.max_memory_len)
+        self.file_handler: Optional[Any] = None
+        self.redis_client: Optional[Any] = None
+        self.redis_channel = redis_channel
+
+        if "file" in self.backends:
+            self._setup_file_logging()
         
-        self.results_dir = Path(results_dir)
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.update_interval = update_interval
-        
-        # Data storage
-        self.metrics_history = {
-            'updates': deque(maxlen=1000),
-            'rewards': deque(maxlen=1000),
-            'mse': deque(maxlen=1000),
-            'complexity': deque(maxlen=1000),
-            'discoveries': []
-        }
-        
-        # Discovery tracking
-        self.unique_discoveries = set()
-        self.discovery_timeline = []
-        
-        # Setup plot
-        self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle('Janus Physics Discovery - Live Monitor', fontsize=16)
-        
-    # This method is designed to parse log lines. If used with actual file reading,
-    # ensure the file is opened and closed properly, preferably using a context manager.
-    def parse_log_line(self, line: str) -> Dict[str, Any]:
-        """Parse a log line for metrics."""
-        
-        metrics = {}
-        
-        # Parse update number
-        update_match = re.search(r'Update (\d+)/(\d+)', line)
-        if update_match:
-            metrics['update'] = int(update_match.group(1))
-            metrics['total_updates'] = int(update_match.group(2))
-        
-        # Parse metrics
-        reward_match = re.search(r'Avg Reward:\s*([-\d.]+)', line)
-        if reward_match:
-            metrics['reward'] = float(reward_match.group(1))
-            
-        mse_match = re.search(r'Avg MSE:\s*([\d.e+-]+)', line)
-        if mse_match:
-            metrics['mse'] = float(mse_match.group(1))
-            
-        complexity_match = re.search(r'Avg Complexity:\s*([\d.]+)', line)
-        if complexity_match:
-            metrics['complexity'] = float(complexity_match.group(1))
-        
-        return metrics
-    
-    def read_latest_checkpoint(self) -> Dict[str, Any]:
-        """Read latest checkpoint for discoveries."""
-        
-        checkpoints = list(self.checkpoint_dir.glob("*.pt"))
-        if not checkpoints:
-            return {}
-        
-        latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
-        
-        try:
-            import torch
-            checkpoint = torch.load(latest, map_location='cpu')
-            return checkpoint
-        except:
-            return {}
-    
-    # TODO: If reading live data from log files, ensure to use
-    # 'with open(logfile, 'r') as f:' to manage file resources correctly.
-    def update_data(self):
-        """Update data from logs and checkpoints."""
-        
-        # Read console output (would need to be saved to file in practice)
-        # For now, simulate with random improvements
-        n = len(self.metrics_history['updates'])
-        
-        if n == 0:
-            # Initialize
-            update = 0
-            reward = -0.5
-            mse = 1e13
-            complexity = 2.0
-        else:
-            # Simulate progression
-            update = self.metrics_history['updates'][-1] + 1
-            
-            # Gradual improvement with noise
-            prev_reward = self.metrics_history['rewards'][-1]
-            reward = prev_reward + np.random.normal(0.01, 0.05)
-            reward = max(-5, min(1, reward))  # Clamp
-            
-            prev_mse = self.metrics_history['mse'][-1]
-            if prev_mse > 1:
-                mse = prev_mse * np.exp(np.random.normal(-0.1, 0.05))
+        if "redis" in self.backends:
+            if not _REDIS_AVAILABLE:
+                print("Warning: Redis backend requested but redis-py not installed. Skipping Redis.")
+                self.backends.remove("redis")
             else:
-                mse = prev_mse * np.exp(np.random.normal(-0.01, 0.02))
-            
-            complexity = np.random.normal(5 + update/20, 1)
-            complexity = max(1, min(20, complexity))
+                self._setup_redis_logging(redis_host, redis_port)
         
-        # Store metrics
-        self.metrics_history['updates'].append(update)
-        self.metrics_history['rewards'].append(reward)
-        self.metrics_history['mse'].append(mse)
-        self.metrics_history['complexity'].append(complexity)
-        
-        # Simulate discoveries
-        if np.random.random() < 0.1:  # 10% chance of discovery
-            expressions = [
-                "x", "v", "x**2", "v**2", 
-                "0.5 * v**2", "0.5 * x**2",
-                "x * v", "sin(x)", "cos(v)",
-                "0.5 * v**2 + 0.5 * x**2"
-            ]
-            
-            # Prefer more complex expressions as training progresses
-            weights = np.array([1/(i+1) for i in range(len(expressions))])
-            weights = weights ** (1 - update/100)
-            weights /= weights.sum()
-            
-            expr = np.random.choice(expressions, p=weights)
-            
-            if expr not in self.unique_discoveries:
-                self.unique_discoveries.add(expr)
-                self.discovery_timeline.append({
-                    'update': update,
-                    'expression': expr,
-                    'mse': mse
-                })
-    
-    def update_plots(self, frame):
-        """Update all plots."""
-        
-        # Update data
-        self.update_data()
-        
-        # Clear axes
-        for ax in self.axes.flat:
-            ax.clear()
-        
-        # 1. Reward progress
-        ax = self.axes[0, 0]
-        if len(self.metrics_history['rewards']) > 1:
-            updates = list(self.metrics_history['updates'])
-            rewards = list(self.metrics_history['rewards'])
-            
-            ax.plot(updates, rewards, 'b-', linewidth=2)
-            ax.fill_between(updates, rewards, alpha=0.3)
-            
-            # Moving average
-            if len(rewards) > 10:
-                ma = np.convolve(rewards, np.ones(10)/10, mode='valid')
-                ax.plot(updates[9:], ma, 'r--', linewidth=2, label='MA(10)')
-            
-        ax.set_xlabel('Update')
-        ax.set_ylabel('Average Reward')
-        ax.set_title('Reward Progress')
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        
-        # 2. MSE evolution (log scale)
-        ax = self.axes[0, 1]
-        if len(self.metrics_history['mse']) > 1:
-            updates = list(self.metrics_history['updates'])
-            mses = list(self.metrics_history['mse'])
-            
-            ax.semilogy(updates, mses, 'g-', linewidth=2)
-            
-            # Mark discoveries
-            for disc in self.discovery_timeline[-5:]:  # Last 5 discoveries
-                ax.axvline(disc['update'], color='red', alpha=0.5, linestyle='--')
-                ax.text(disc['update'], disc['mse'], disc['expression'][:10], 
-                       rotation=45, fontsize=8)
-        
-        ax.set_xlabel('Update')
-        ax.set_ylabel('MSE (log scale)')
-        ax.set_title('MSE Evolution')
-        ax.grid(True, alpha=0.3)
-        
-        # 3. Discovery timeline
-        ax = self.axes[1, 0]
-        if self.discovery_timeline:
-            updates = [d['update'] for d in self.discovery_timeline]
-            complexities = [len(d['expression']) for d in self.discovery_timeline]
-            
-            ax.scatter(updates, complexities, c=range(len(updates)), 
-                      cmap='viridis', s=100, alpha=0.7)
-            
-            # Annotate recent discoveries
-            for disc in self.discovery_timeline[-3:]:
-                ax.annotate(disc['expression'], 
-                           (disc['update'], len(disc['expression'])),
-                           xytext=(5, 5), textcoords='offset points',
-                           fontsize=8, bbox=dict(boxstyle='round,pad=0.3', 
-                                               facecolor='yellow', alpha=0.5))
-        
-        ax.set_xlabel('Update')
-        ax.set_ylabel('Expression Length')
-        ax.set_title(f'Discovery Timeline ({len(self.unique_discoveries)} unique)')
-        ax.grid(True, alpha=0.3)
-        
-        # 4. Complexity distribution
-        ax = self.axes[1, 1]
-        if len(self.metrics_history['complexity']) > 20:
-            recent_complexity = list(self.metrics_history['complexity'])[-100:]
-            
-            ax.hist(recent_complexity, bins=20, alpha=0.7, color='purple', edgecolor='black')
-            ax.axvline(np.mean(recent_complexity), color='red', linestyle='--', 
-                      linewidth=2, label=f'Mean: {np.mean(recent_complexity):.1f}')
-            
-        ax.set_xlabel('Complexity')
-        ax.set_ylabel('Frequency')
-        ax.set_title('Complexity Distribution (last 100 updates)')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Status text
-        current_update = self.metrics_history['updates'][-1] if self.metrics_history['updates'] else 0
-        current_reward = self.metrics_history['rewards'][-1] if self.metrics_history['rewards'] else 0
-        current_mse = self.metrics_history['mse'][-1] if self.metrics_history['mse'] else 0
-        
-        status = f"Update: {current_update} | Reward: {current_reward:.3f} | MSE: {current_mse:.2e}"
-        self.fig.text(0.5, 0.02, status, ha='center', fontsize=12, 
-                     bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray'))
-        
-        plt.tight_layout()
-    
-    def run(self):
-        """Run the live monitor."""
-        
-        print("🚀 Starting Janus Live Monitor")
-        print("=" * 50)
-        print("Monitoring training progress...")
-        print("Press Ctrl+C to stop\n")
-        
-        # Create animation
-        ani = FuncAnimation(
-            self.fig, 
-            self.update_plots,
-            interval=self.update_interval,
-            cache_frame_data=False
-        )
-        
+        TrainingLogger._instances.add(self)
+
+    def _setup_file_logging(self):
         try:
-            plt.show()
-        finally:
-            plt.close(self.fig)  # Ensure figure is closed
+            # Ensure directory exists
+            if os.path.dirname(self.log_file_path): # Create only if path has a directory part
+                os.makedirs(os.path.dirname(self.log_file_path), exist_ok=True)
+            # Open in append mode, create if not exists
+            self.file_handler = open(self.log_file_path, 'a')
+        except IOError as e:
+            print(f"Error setting up file logging at {self.log_file_path}: {e}")
+            if "file" in self.backends: self.backends.remove("file")
 
+    def _setup_redis_logging(self, host: str, port: int):
+        try:
+            self.redis_client = redis.Redis(host=host, port=port, decode_responses=True)
+            self.redis_client.ping() # Check connection
+            print(f"Successfully connected to Redis at {host}:{port}")
+        except Exception as e:
+            print(f"Error setting up Redis logging (host={host}, port={port}): {e}")
+            if "redis" in self.backends: self.backends.remove("redis")
+            self.redis_client = None
 
-class DiscoveryAnalyzer:
-    """Analyze discovered expressions in real-time."""
+    def log_metrics(self, **kwargs: Any):
+        log_entry = {'timestamp': time.time()}
+        log_entry.update(kwargs) # Add all provided metrics
+
+        if "memory" in self.backends:
+            self.memory_logs.append(log_entry)
+
+        if "file" in self.backends and self.file_handler:
+            try:
+                json_entry = json.dumps(log_entry)
+                self.file_handler.write(json_entry + '\n')
+                self.file_handler.flush() # Ensure it's written immediately
+            except Exception as e:
+                print(f"Error writing to log file: {e}")
+
+        if "redis" in self.backends and self.redis_client:
+            try:
+                json_entry = json.dumps(log_entry)
+                self.redis_client.publish(self.redis_channel, json_entry)
+            except Exception as e:
+                print(f"Error publishing to Redis: {e}")
     
-    def __init__(self):
-        self.discoveries = {}
-        
-    def analyze_expression(self, expr_str: str, mse: float) -> Dict[str, Any]:
-        """Analyze a discovered expression."""
-        
-        analysis = {
-            'expression': expr_str,
-            'mse': mse,
-            'length': len(expr_str),
-            'operators': self._count_operators(expr_str),
-            'variables': self._extract_variables(expr_str),
-            'is_conservation': self._check_conservation_form(expr_str),
-            'complexity_score': self._calculate_complexity(expr_str)
+    def get_memory_logs(self) -> List[Dict[str, Any]]:
+        return list(self.memory_logs)
+
+    def close(self):
+        if self.file_handler:
+            try:
+                self.file_handler.close()
+            except Exception as e:
+                print(f"Error closing log file: {e}")
+            self.file_handler = None
+        # Redis client typically doesn't need explicit close unless using connection pool with context manager
+        # print("TrainingLogger closed.")
+
+    def __del__(self):
+        self.close()
+    
+    @classmethod
+    def get_all_instances(cls):
+        return list(cls._instances)
+
+
+class LiveMonitor:
+    def __init__(self,
+                 data_source: str = "memory", # "file", "redis", "memory", "callback"
+                 log_file_path: str = "janus_training_log.jsonl",
+                 redis_host: str = 'localhost',
+                 redis_port: int = 6379,
+                 redis_channel: str = 'janus_training_metrics',
+                 logger_instance: Optional[TrainingLogger] = None,
+                 update_interval_sec: float = 1.0,
+                 plot_config: Optional[Dict[str, Any]] = None):
+
+        if not _MPL_AVAILABLE:
+            print("Matplotlib is not available. LiveMonitor cannot create plots. Only data retrieval will work.")
+
+        self.data_source_type = data_source.lower()
+        self.log_file_path = log_file_path
+        self.update_interval_sec = update_interval_sec
+        self.plot_config = plot_config if plot_config else self._default_plot_config()
+
+        self.data_history: Dict[str, deque] = {key: deque(maxlen=500) for key in self.plot_config.keys()}
+        self.data_history['timestamps'] = deque(maxlen=500)
+
+        self.is_running = False
+        self.thread: Optional[threading.Thread] = None
+        self.animation: Optional[FuncAnimation] = None
+
+        self.logger_instance = logger_instance
+        self.redis_pubsub: Optional[Any] = None
+        self.redis_thread: Optional[threading.Thread] = None
+        self._file_last_pos = 0
+
+        if self.data_source_type == "redis":
+            if not _REDIS_AVAILABLE:
+                raise ImportError("Redis backend selected for LiveMonitor, but redis-py is not installed.")
+            self.redis_client = redis.Redis(host=redis_host, port=redis_port)
+            self.redis_channel = redis_channel
+
+        if _MPL_AVAILABLE:
+            self._setup_plot()
+
+    def _default_plot_config(self) -> Dict[str, Any]:
+        return {
+            'reward': {'label': 'Total Reward', 'color': 'blue', 'ax_idx': 0},
+            'conservation_bonus': {'label': 'Conservation Bonus', 'color': 'green', 'ax_idx': 1},
+            'symmetry_score': {'label': 'Symmetry Score', 'color': 'red', 'ax_idx': 1},
+            'best_hypothesis_score': {'label': 'Best Hypothesis Score', 'color': 'purple', 'ax_idx': 0},
+            'entropy_production': {'label': 'Entropy Production', 'color': 'orange', 'ax_idx': 2},
+            'step': {'label': 'Training Step', 'color': 'grey', 'ax_idx': 3, 'plot_type': 'line'}
         }
-        
-        return analysis
-    
-    def _count_operators(self, expr: str) -> Dict[str, int]:
-        """Count operators in expression."""
-        ops = {'+': 0, '-': 0, '*': 0, '/': 0, '**': 0, 
-               'sin': 0, 'cos': 0, 'log': 0, 'exp': 0}
-        
-        for op in ops:
-            ops[op] = expr.count(op)
-        
-        return {k: v for k, v in ops.items() if v > 0}
-    
-    def _extract_variables(self, expr: str) -> List[str]:
-        """Extract variables from expression."""
-        import re
-        # Simple pattern for variables
-        return list(set(re.findall(r'\b[xvEθ]\w*\b', expr)))
-    
-    def _check_conservation_form(self, expr: str) -> bool:
-        """Check if expression looks like a conservation law."""
-        # Energy-like: sum of squared terms
-        if '**2' in expr and '+' in expr:
-            return True
-        # Momentum-like: product terms
-        if '*' in expr and len(self._extract_variables(expr)) > 1:
-            return True
-        return False
-    
-    def _calculate_complexity(self, expr: str) -> float:
-        """Calculate complexity score."""
-        base = len(expr)
-        
-        # Penalize nested operations
-        base += expr.count('(') * 2
-        
-        # Bonus for simplicity
-        if expr.count('+') + expr.count('-') <= 1:
-            base *= 0.8
-        
-        return base
-    
-    def print_discovery_report(self, discoveries: List[Dict]):
-        """Print a nice discovery report."""
-        
-        print("\n" + "="*60)
-        print("DISCOVERY REPORT")
-        print("="*60)
-        
-        # Sort by MSE
-        discoveries.sort(key=lambda x: x['mse'])
-        
-        print(f"\nTop 5 Discoveries (by MSE):")
-        print("-" * 40)
-        
-        for i, disc in enumerate(discoveries[:5]):
-            print(f"\n{i+1}. {disc['expression']}")
-            print(f"   MSE: {disc['mse']:.3e}")
-            print(f"   Complexity: {disc['complexity_score']:.1f}")
-            if disc['is_conservation']:
-                print("   ✓ Potential conservation law!")
-        
-        # Analysis
-        if discoveries:
-            conservations = [d for d in discoveries if d['is_conservation']]
-            print(f"\n📊 Summary:")
-            print(f"   Total discoveries: {len(discoveries)}")
-            print(f"   Conservation laws: {len(conservations)}")
-            print(f"   Best MSE: {discoveries[0]['mse']:.3e}")
-            
-            if discoveries[0]['mse'] < 1e-2:
-                print("\n🎉 Excellent! Very low MSE achieved!")
-            elif discoveries[0]['mse'] < 1e-1:
-                print("\n✅ Good progress! Getting close to true law.")
-            else:
-                print("\n🔄 Keep training - MSE still improving.")
 
+    def _setup_plot(self):
+        if not _MPL_AVAILABLE: return
 
-# Quick monitoring script
-def monitor_training_progress():
-    """Simple function to monitor training output."""
-    
-    print("Simple Training Monitor")
-    print("=" * 30)
-    
-    analyzer = DiscoveryAnalyzer()
-    
-    # Simulate reading from log
-    mock_discoveries = [
-        ("x", 5.2),
-        ("v", 4.8),
-        ("x**2", 2.1),
-        ("v**2", 1.9),
-        ("0.5 * v**2", 0.8),
-        ("0.5 * x**2", 0.7),
-        ("0.5 * v**2 + 0.5 * x**2", 0.01)
-    ]
-    
-    discoveries = []
-    for expr, mse in mock_discoveries:
-        analysis = analyzer.analyze_expression(expr, mse)
-        discoveries.append(analysis)
-    
-    analyzer.print_discovery_report(discoveries)
+        num_subplots = max(pc['ax_idx'] for pc in self.plot_config.values()) + 1
+        self.fig, self.axes = plt.subplots(num_subplots, 1, figsize=(10, 2 * num_subplots), sharex=True)
+        if num_subplots == 1: self.axes = [self.axes]
 
+        self.lines = {}
+        for key, config in self.plot_config.items():
+            if key == 'step': continue
+            ax = self.axes[config['ax_idx']]
+            line, = ax.plot([], [], label=config['label'], color=config['color'])
+            self.lines[key] = line
+            ax.legend(loc='upper left')
+            ax.set_ylabel(config['label'])
 
-if __name__ == "__main__":
-    import sys
+        self.axes[-1].set_xlabel("Time / Steps")
+        self.fig.tight_layout()
+        plt.ion()
+
+    def _update_plot(self, frame: Optional[Any] = None):
+        if not _MPL_AVAILABLE: return True
+
+        x_data_key = 'step' if 'step' in self.data_history and len(self.data_history['step']) > 0 else 'timestamps'
+        x_data = self.data_history[x_data_key]
+        if not list(x_data): return True
+
+        for key, line in self.lines.items():
+            if key in self.data_history and len(self.data_history[key]) > 0:
+                y_data = list(self.data_history[key])
+                current_x_data = list(x_data)
+
+                if len(y_data) <= len(current_x_data) :
+                    plot_x_data = current_x_data[-len(y_data):]
+                    line.set_data(plot_x_data, y_data)
+
+                ax_idx = self.plot_config[key]['ax_idx']
+                self.axes[ax_idx].relim()
+                self.axes[ax_idx].autoscale_view()
+
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+        return True
+
+    def _process_log_entry(self, entry: Dict[str, Any]):
+        timestamp = entry.get('timestamp', time.time())
+        self.data_history['timestamps'].append(timestamp)
+
+        for key in self.plot_config.keys():
+            if key in entry:
+                self.data_history[key].append(entry[key])
+
+    def _fetch_data_memory(self):
+        logger_to_use = self.logger_instance
+        if not logger_to_use:
+            if TrainingLogger._instances:
+                logger_to_use = next(iter(TrainingLogger._instances), None)
+
+        if logger_to_use:
+            all_logs = logger_to_use.get_memory_logs()
+            if all_logs:
+                temp_data_store = {k:[] for k in self.data_history.keys()}
+                for log_entry in logger_to_use.memory_logs:
+                    temp_data_store['timestamps'].append(log_entry.get('timestamp', time.time()))
+                    for plot_key in self.plot_config.keys():
+                         if plot_key in log_entry:
+                            temp_data_store[plot_key].append(log_entry[plot_key])
+
+                for k, v_list in temp_data_store.items():
+                    self.data_history[k].clear()
+                    self.data_history[k].extend(v_list)
+
+    def _fetch_data_file(self):
+        try:
+            if not os.path.exists(self.log_file_path): return
+            with open(self.log_file_path, 'r') as f:
+                f.seek(self._file_last_pos)
+                for line_content in f: # renamed 'line' to 'line_content'
+                    try:
+                        entry = json.loads(line_content)
+                        self._process_log_entry(entry)
+                    except json.JSONDecodeError:
+                        print(f"Warning: Could not decode JSON line: {line_content.strip()}")
+                self._file_last_pos = f.tell()
+        except Exception as e:
+            print(f"Error reading log file {self.log_file_path}: {e}")
+
+    def _listen_to_redis(self):
+        if not self.redis_client : return
+        self.redis_pubsub = self.redis_client.pubsub()
+        self.redis_pubsub.subscribe(self.redis_channel)
+        print(f"LiveMonitor: Subscribed to Redis channel '{self.redis_channel}'")
+        for message in self.redis_pubsub.listen():
+            if not self.is_running: break
+            if message['type'] == 'message':
+                try:
+                    entry = json.loads(message['data'])
+                    self._process_log_entry(entry)
+                except json.JSONDecodeError:
+                    print(f"Warning: Could not decode JSON from Redis: {message['data']}")
+                except Exception as e:
+                    print(f"Error processing Redis message: {e}")
+        print("LiveMonitor: Redis listener thread stopped.")
+
+    def _data_loop(self):
+        while self.is_running:
+            if self.data_source_type == "memory":
+                self._fetch_data_memory()
+            elif self.data_source_type == "file":
+                self._fetch_data_file()
+            elif self.data_source_type == "callback":
+                pass
+            time.sleep(self.update_interval_sec)
+        print("LiveMonitor: Data loop stopped.")
+
+    def start_monitoring(self):
+        if self.is_running:
+            print("Monitor is already running.")
+            return
+
+        self.is_running = True
+        print(f"LiveMonitor: Starting monitoring (source: {self.data_source_type})...")
+
+        if self.data_source_type == "redis":
+            if not self.redis_client:
+                print("Error: Redis client not initialized for Redis data source.")
+                self.is_running = False
+                return
+            self.redis_thread = threading.Thread(target=self._listen_to_redis, daemon=True)
+            self.redis_thread.start()
+
+        self.thread = threading.Thread(target=self._data_loop, daemon=True)
+        self.thread.start()
+
+        if _MPL_AVAILABLE and plt.get_backend():
+            try:
+                self.animation = FuncAnimation(self.fig, self._update_plot,
+                                               interval=self.update_interval_sec * 1000, cache_frame_data=False)
+                plt.show(block=False)
+                print("LiveMonitor: Matplotlib animation started.")
+            except Exception as e:
+                print(f"LiveMonitor: Failed to start Matplotlib animation: {e}")
+
+    def stop_monitoring(self):
+        if not self.is_running:
+            print("Monitor is not running.")
+            return
+
+        print("LiveMonitor: Stopping monitoring...")
+        self.is_running = False
+
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=self.update_interval_sec * 2)
+        
+        if self.redis_pubsub:
+            try:
+                self.redis_pubsub.unsubscribe(self.redis_channel)
+                self.redis_pubsub.close()
+            except Exception as e: print(f"Error closing redis pubsub: {e}")
+            self.redis_pubsub = None
+        
+        if self.redis_thread and self.redis_thread.is_alive():
+             self.redis_thread.join(timeout=2)
+        
+        if _MPL_AVAILABLE and hasattr(self, 'fig') and self.fig:
+            try:
+                plt.close(self.fig)
+            except Exception as e: print(f"Error closing matplotlib figure: {e}")
+        
+        print("LiveMonitor: Monitoring stopped.")
+
+    def direct_log_entry(self, entry: Dict[str, Any]):
+        if self.data_source_type != "callback":
+            print("Warning: direct_log_entry called but source is not 'callback'.")
+        self._process_log_entry(entry)
+
+if __name__ == '__main__':
+    print("Starting Live Monitor Example...")
     
-    if len(sys.argv) > 1 and sys.argv[1] == "--simple":
-        # Run simple monitor
-        monitor_training_progress()
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    log_file = os.path.join(current_dir, "example_training_run.jsonl")
+
+    if _REDIS_AVAILABLE:
+         logger = TrainingLogger(backends=["redis", "memory"], redis_channel="janus_test_metrics")
     else:
-        # Run live dashboard
-        monitor = JanusLiveMonitor()
-        monitor.run()
+         logger = TrainingLogger(backends=["file", "memory"], log_file_path=log_file)
+
+    if "redis" in logger.backends:
+        monitor = LiveMonitor(data_source="redis", redis_channel=logger.redis_channel, update_interval_sec=0.5)
+    else:
+        monitor = LiveMonitor(data_source="file", log_file_path=log_file, update_interval_sec=0.5)
+
+    monitor.start_monitoring()
+
+    print(f"Simulating training loop for 20 seconds. Log file: {log_file if 'file' in logger.backends else 'N/A'}")
+    try:
+        for i in range(40):
+            reward = np.sin(i / 10) + np.random.rand() * 0.1
+            conservation = np.exp(- (i % 10) / 5) + np.random.rand() * 0.05
+            symmetry = (np.cos(i / 5) + 1) / 2 + np.random.rand() * 0.05
+            best_score = reward + conservation + symmetry + np.random.rand() * 0.2
+            entropy = np.random.rand() * 0.01 if i%2==0 else 0.02
+
+            logger.log_metrics(
+                step=i, episode=(i // 10), reward=float(reward),
+                conservation_bonus=float(conservation), symmetry_score=float(symmetry),
+                discovered_law_params={'p1': float(np.random.rand()), 'p2': str(np.random.choice(['a','b']))},
+                best_hypothesis_score=float(best_score), entropy_production=entropy )
+
+            if _MPL_AVAILABLE and hasattr(monitor,'fig') and monitor.fig.canvas.manager :
+                plt.pause(0.01)
+            time.sleep(0.5)
+    except KeyboardInterrupt: print("Simulation interrupted.")
+    finally:
+        print("Simulation finished.")
+        logger.close()
+        monitor.stop_monitoring()
+        for inst in TrainingLogger.get_all_instances(): inst.close()
+        if _MPL_AVAILABLE and plt.get_fignums(): plt.show(block=True)
+        print("Exiting example.")
