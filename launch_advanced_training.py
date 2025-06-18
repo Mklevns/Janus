@@ -161,7 +161,7 @@ def setup_environment(config: Dict[str, Any]):
                 print("  Continuing without Ray (will use single-machine training)")
 
 
-def launch_training(config: Dict[str, Any], resume: bool = False):
+def launch_training(config: Dict[str, Any], resume: bool = False): # config here is the dict from YAML
     """Launch the training process."""
     
     from integrated_pipeline import AdvancedJanusTrainer, JanusConfig
@@ -211,7 +211,7 @@ def launch_training(config: Dict[str, Any], resume: bool = False):
         trainer.train()
         
         # Run validation if requested
-        if config.get('run_validation_suite', False):
+        if janus_config.run_validation_suite: # Use janus_config field
             print("\nRunning validation suite...")
             trainer.run_experiment_suite()
         
@@ -219,7 +219,7 @@ def launch_training(config: Dict[str, Any], resume: bool = False):
         
     except KeyboardInterrupt:
         print("\n⚠️  Training interrupted by user")
-        save_checkpoint(trainer, config)
+        save_checkpoint(trainer, janus_config) # Pass janus_config object
         
     except Exception as e:
         print(f"\n❌ Training failed with error: {e}")
@@ -232,20 +232,46 @@ def launch_training(config: Dict[str, Any], resume: bool = False):
         print("\nCleanup completed")
 
 
-def save_checkpoint(trainer, config: Dict[str, Any]):
+def save_checkpoint(trainer, janus_config: JanusConfig): # Changed signature to JanusConfig
     """Save emergency checkpoint."""
     
     print("\nSaving emergency checkpoint...")
     
+    # Ensure grammar state can be retrieved; might need specific method on trainer or grammar object
+    grammar_state = None
+    if hasattr(trainer, 'grammar') and hasattr(trainer.grammar, 'export_grammar_state'):
+        grammar_state = trainer.grammar.export_grammar_state()
+    elif hasattr(trainer, 'env') and hasattr(trainer.env, 'grammar') and hasattr(trainer.env.grammar, 'export_grammar_state'):
+        grammar_state = trainer.env.grammar.export_grammar_state()
+
+
+    policy_state = None
+    optimizer_state = None
+    current_iteration = 0
+
+    if hasattr(trainer, 'trainer') and trainer.trainer is not None: # If trainer.trainer is the actual PPO/etc trainer
+        if hasattr(trainer.trainer, 'policy') and hasattr(trainer.trainer.policy, 'state_dict'):
+            policy_state = trainer.trainer.policy.state_dict()
+        if hasattr(trainer.trainer, 'optimizer') and hasattr(trainer.trainer.optimizer, 'state_dict'):
+            optimizer_state = trainer.trainer.optimizer.state_dict()
+        current_iteration = getattr(trainer.trainer, 'training_iteration',
+                                getattr(trainer.trainer, '_iteration', 0)) # Common attribute names
+    elif hasattr(trainer, 'policy') and hasattr(trainer.policy, 'state_dict'): # If AdvancedJanusTrainer itself holds policy
+        policy_state = trainer.policy.state_dict()
+        if hasattr(trainer, 'optimizer') and hasattr(trainer.optimizer, 'state_dict'):
+             optimizer_state = trainer.optimizer.state_dict()
+        current_iteration = getattr(trainer, 'training_iteration', 0)
+
+
     checkpoint = {
-        'iteration': getattr(trainer.trainer, 'training_iteration', 0),
-        'policy_state_dict': trainer.trainer.policy.state_dict(),
-        'optimizer_state_dict': trainer.trainer.optimizer.state_dict(),
-        'config': config,
-        'grammar_state': trainer.grammar.export_grammar_state()
+        'iteration': current_iteration,
+        'policy_state_dict': policy_state,
+        'optimizer_state_dict': optimizer_state,
+        'config': janus_config.model_dump(), # Save JanusConfig as dict
+        'grammar_state': grammar_state
     }
     
-    checkpoint_path = Path(config['checkpoint_dir']) / "emergency_checkpoint.pt"
+    checkpoint_path = Path(janus_config.checkpoint_dir) / "emergency_checkpoint.pt" # Use from JanusConfig
     torch.save(checkpoint, checkpoint_path)
     print(f"✓ Checkpoint saved to {checkpoint_path}")
 
@@ -332,6 +358,12 @@ def main():
         help='Enable debug mode'
     )
     
+    parser.add_argument(
+        '--strict',
+        action='store_true',
+        help='Enable strict mode for plugin loading and experiment validation'
+    )
+
     args = parser.parse_args()
     
     # Print banner
@@ -342,11 +374,20 @@ def main():
     
     # Load and validate configuration
     try:
-        config = validate_config(args.config)
-        print(f"\n✓ Configuration loaded from {args.config}")
-        print(f"  Training mode: {config['training_mode']}")
-        print(f"  Target phenomena: {config['target_phenomena']}")
-        print(f"  Total timesteps: {config['total_timesteps']:,}")
+        config_dict = validate_config(args.config) # Returns a dict
+        print(f"\n✓ Raw configuration loaded from {args.config}")
+        # Integrate command-line strict mode into the config dictionary
+        # This will be picked up by JanusConfig when it's instantiated
+        config_dict['strict_mode'] = args.strict
+
+        # Note: JanusConfig instantiation happens inside launch_training or when creating AdvancedJanusTrainer
+        # For modes like 'sweep' or 'validate' that might not go through launch_training's JanusConfig creation,
+        # we need to be mindful of how strict_mode is passed if those paths also use ExperimentRunner.
+
+        print(f"  Training mode: {config_dict['training_mode']}")
+        print(f"  Target phenomena: {config_dict['target_phenomena']}")
+        print(f"  Total timesteps: {config_dict['total_timesteps']:,}")
+        print(f"  Strict mode CLI: {args.strict}")
         
     except Exception as e:
         print(f"\n❌ Configuration error: {e}")
@@ -355,25 +396,39 @@ def main():
     # Execute based on mode
     try:
         if args.mode == 'train':
-            setup_environment(config)
-            launch_training(config, resume=args.resume)
+            # setup_environment expects a dict, config_dict is fine
+            setup_environment(config_dict)
+            # launch_training expects a dict, instantiates JanusConfig inside
+            launch_training(config_dict, resume=args.resume)
             
         elif args.mode == 'sweep':
+            # run_distributed_sweep expects config_path, validate_config is called inside it.
+            # We need to ensure strict_mode is passed to ExperimentRunner if it's used by sweep's internals.
+            # For now, assuming sweep doesn't directly use ExperimentRunner in a way that needs strict_mode.
+            # If it does, run_distributed_sweep would need modification.
+            print(f"⚠️  Strict mode not directly propagated to 'sweep' mode's internal ExperimentRunner instances yet.")
             run_distributed_sweep(args.config, n_trials=args.n_trials)
             
         elif args.mode == 'validate':
-            # Run validation only
             from experiment_runner import run_phase1_validation, run_phase2_robustness
-            setup_environment(config)
+            # setup_environment expects a dict
+            setup_environment(config_dict)
             
-            print("\nRunning validation experiments...")
-            phase1_results = run_phase1_validation()
-            phase2_results = run_phase2_robustness()
+            print(f"\nRunning validation experiments (Strict mode: {args.strict})...")
+            # Pass strict_mode to these validation functions
+            phase1_results = run_phase1_validation(strict_mode_override=args.strict)
+            phase2_results = run_phase2_robustness(strict_mode_override=args.strict)
             
             print("\n✓ Validation completed")
-            print(f"  Phase 1 results: {len(phase1_results)} experiments")
-            print(f"  Phase 2 results: {len(phase2_results)} experiments")
-            
+            if phase1_results is not None:
+                 print(f"  Phase 1 results: {len(phase1_results)} experiments run (DataFrame shape: {phase1_results.shape})")
+            else:
+                 print("  Phase 1 results: None")
+            if phase2_results is not None:
+                print(f"  Phase 2 results: {len(phase2_results)} experiments run (DataFrame shape: {phase2_results.shape})")
+            else:
+                print("  Phase 2 results: None")
+
     except Exception as e:
         if args.debug:
             raise

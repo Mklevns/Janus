@@ -331,6 +331,235 @@ class TestSymbolicDiscoveryEnv(unittest.TestCase):
                         f"Reward with smaller mse_scale_factor ({actual_reward_high_mse_small_scale}) "
                         f"should be greater than with larger mse_scale_factor ({actual_reward_high_mse}) for the same high MSE.")
 
+    def test_reward_complexity_penalty(self):
+        """Tests that higher complexity expressions get a more negative complexity penalty."""
+        reward_config_complexity = {
+            'completion_bonus': 0.1,
+            'mse_weight': -1.0, # Assuming perfect MSE for this test (norm_mse=0)
+            'mse_scale_factor': 1.0,
+            'complexity_penalty': -0.1, # Non-zero complexity penalty
+            'depth_penalty': 0.0 # No depth penalty for this test
+        }
+        self.env.reward_config = reward_config_complexity
+
+        # Expression 1: v0 + 1.0 (Complexity: var, const, op -> 3)
+        root_node1 = ExpressionNode(node_type=NodeType.OPERATOR, value='+')
+        var_node1 = ExpressionNode(node_type=NodeType.VARIABLE, value=self.variables[0], parent=root_node1)
+        const_node1 = ExpressionNode(node_type=NodeType.CONSTANT, value=1.0, parent=root_node1)
+        root_node1.children = [var_node1, const_node1]
+        self.env.current_state.root = root_node1
+        expr1_obj = root_node1.to_expression(self.grammar)
+        complexity1 = expr1_obj.complexity
+        # Simulate perfect prediction for expr1 (MSE=0)
+        # To do this, we need to make target_data match predictions of v0 + 1.0
+        original_target_data = self.env.target_data.copy()
+        self.env.target_data = np.column_stack((self.target_data[:,0], self.target_data[:,1], self.target_data[:,0] + 1.0))
+        reward1 = self.env._evaluate_expression()
+        self.env.target_data = original_target_data # Restore
+
+        # Expression 2: (v0 + 1.0) + 0.0 (Complexity: 3 for (v0+1), const 0.0, op + -> 5)
+        # This expression is equivalent in value to expr1 if evaluated perfectly.
+        # (v0 + 1.0)
+        sub_expr_node = ExpressionNode(node_type=NodeType.OPERATOR, value='+')
+        sub_expr_node.children = [
+            ExpressionNode(node_type=NodeType.VARIABLE, value=self.variables[0], parent=sub_expr_node),
+            ExpressionNode(node_type=NodeType.CONSTANT, value=1.0, parent=sub_expr_node)
+        ]
+        # ((v0 + 1.0) + 0.0)
+        root_node2 = ExpressionNode(node_type=NodeType.OPERATOR, value='+')
+        const_node_zero = ExpressionNode(node_type=NodeType.CONSTANT, value=0.0, parent=root_node2)
+        root_node2.children = [sub_expr_node, const_node_zero]
+        sub_expr_node.parent = root_node2 # Set parent for sub_expr_node
+
+        self.env.current_state.root = root_node2
+        expr2_obj = root_node2.to_expression(self.grammar)
+        complexity2 = expr2_obj.complexity
+        # Simulate perfect prediction for expr2 (MSE=0)
+        self.env.target_data = np.column_stack((self.target_data[:,0], self.target_data[:,1], self.target_data[:,0] + 1.0 + 0.0))
+        reward2 = self.env._evaluate_expression()
+        self.env.target_data = original_target_data # Restore
+
+        self.assertGreater(complexity1, 0, "Complexity1 should be > 0")
+        self.assertGreater(complexity2, complexity1, "Complexity2 should be greater than Complexity1")
+
+        # Expected rewards (assuming perfect MSE, so norm_mse=0, exp(-scale*norm_mse)=1)
+        # reward = completion + mse_weight * 1 + complexity_penalty * complexity + depth_penalty * max_depth
+        expected_reward1 = (reward_config_complexity['completion_bonus'] +
+                            reward_config_complexity['mse_weight'] * 1.0 +
+                            reward_config_complexity['complexity_penalty'] * complexity1 +
+                            reward_config_complexity['depth_penalty'] * self.env.max_depth)
+
+        expected_reward2 = (reward_config_complexity['completion_bonus'] +
+                            reward_config_complexity['mse_weight'] * 1.0 +
+                            reward_config_complexity['complexity_penalty'] * complexity2 +
+                            reward_config_complexity['depth_penalty'] * self.env.max_depth)
+
+        self.assertAlmostEqual(reward1, expected_reward1, places=5)
+        self.assertAlmostEqual(reward2, expected_reward2, places=5)
+        self.assertLess(reward2, reward1, "Reward for more complex expression should be less due to penalty.")
+
+    def test_reward_depth_penalty(self):
+        """Tests the depth penalty component of the reward function."""
+        # The current implementation of depth_penalty in _evaluate_expression is:
+        # reward_config.get('depth_penalty', -0.001) * self.max_depth
+        # This means it's a constant penalty based on the *environment's* max_depth,
+        # not the actual depth of the generated expression. This test will verify this behavior.
+
+        reward_config_depth = {
+            'completion_bonus': 0.1,
+            'mse_weight': -1.0, # Assuming perfect MSE (norm_mse=0)
+            'mse_scale_factor': 1.0,
+            'complexity_penalty': 0.0, # No complexity penalty for this test
+            'depth_penalty': -0.05 # Non-zero depth penalty
+        }
+        self.env.reward_config = reward_config_depth
+        self.env.max_depth = 5 # Set a specific max_depth for the environment
+
+        # Expression 1: v0 + 1.0 (Depth 2, Complexity 3)
+        root_node1 = ExpressionNode(node_type=NodeType.OPERATOR, value='+', depth=0)
+        var_node1 = ExpressionNode(node_type=NodeType.VARIABLE, value=self.variables[0], parent=root_node1, depth=1)
+        const_node1 = ExpressionNode(node_type=NodeType.CONSTANT, value=1.0, parent=root_node1, depth=1)
+        root_node1.children = [var_node1, const_node1]
+        self.env.current_state.root = root_node1
+        expr1_obj = root_node1.to_expression(self.grammar)
+        complexity1 = expr1_obj.complexity
+
+        original_target_data = self.env.target_data.copy()
+        self.env.target_data = np.column_stack((self.target_data[:,0], self.target_data[:,1], self.target_data[:,0] + 1.0))
+        reward1 = self.env._evaluate_expression()
+        self.env.target_data = original_target_data
+
+        expected_penalty_contribution = reward_config_depth['depth_penalty'] * self.env.max_depth
+        expected_reward1 = (reward_config_depth['completion_bonus'] +
+                            reward_config_depth['mse_weight'] * 1.0 + # Perfect MSE
+                            reward_config_depth['complexity_penalty'] * complexity1 +
+                            expected_penalty_contribution)
+
+        self.assertAlmostEqual(reward1, expected_reward1, places=5,
+                               msg=f"Reward for depth test does not match. Expected penalty part: {expected_penalty_contribution}")
+
+        # If we change self.env.max_depth, the reward should change if depth_penalty is non-zero.
+        self.env.max_depth = 10 # Increase max_depth
+        reward_config_depth_higher_max = reward_config_depth.copy()
+        self.env.reward_config = reward_config_depth_higher_max # ensure it's using the same penalty rates
+
+        self.env.current_state.root = root_node1 # Same expression
+        self.env.target_data = np.column_stack((self.target_data[:,0], self.target_data[:,1], self.target_data[:,0] + 1.0))
+        reward_higher_max_depth = self.env._evaluate_expression()
+        self.env.target_data = original_target_data
+
+        expected_penalty_contribution_higher = reward_config_depth_higher_max['depth_penalty'] * self.env.max_depth
+        expected_reward_higher = (reward_config_depth_higher_max['completion_bonus'] +
+                                 reward_config_depth_higher_max['mse_weight'] * 1.0 +
+                                 reward_config_depth_higher_max['complexity_penalty'] * complexity1 +
+                                 expected_penalty_contribution_higher)
+
+        self.assertAlmostEqual(reward_higher_max_depth, expected_reward_higher, places=5)
+        self.assertLess(reward_higher_max_depth, reward1,
+                        "Reward should be lower (more penalized) when env.max_depth is higher, given negative depth_penalty.")
+
+
+    def test_reward_incomplete_expression_penalty(self):
+        """Tests the penalty applied for incomplete expressions."""
+        # Current code in _evaluate_expression returns timeout_penalty if expr is None
+        # (i.e. current_state.root.to_expression(self.grammar) returns None for incomplete expressions)
+        timeout_penalty_val = -0.75
+        self.env.reward_config['timeout_penalty'] = timeout_penalty_val
+
+        # Create an incomplete expression (e.g., operator '+' with only one child)
+        root_node = ExpressionNode(node_type=NodeType.OPERATOR, value='+')
+        var_node = ExpressionNode(node_type=NodeType.VARIABLE, value=self.variables[0], parent=root_node)
+        root_node.children = [var_node] # Missing second child
+
+        self.env.current_state.root = root_node
+        self.assertFalse(self.env.current_state.is_complete(), "Expression should be incomplete.")
+
+        expr_obj = root_node.to_expression(self.grammar) # This should be None
+        self.assertIsNone(expr_obj, "Incomplete ExpressionNode tree should yield None from to_expression.")
+
+        reward = self.env._evaluate_expression()
+        self.assertEqual(reward, timeout_penalty_val,
+                         "Reward for incomplete expression should match timeout_penalty.")
+
+    def test_action_add_operator(self):
+        """Tests the effect of ACTION_ADD_OPERATOR."""
+        self.env.reset()
+        self.assertIsNotNone(self.env.current_state.root, "Initial root should not be None")
+        self.assertEqual(self.env.current_state.root.node_type, NodeType.EMPTY, "Initial root should be EMPTY")
+
+        # Find the action ID for adding '+' operator
+        op_to_add = '+'
+        action_id = -1
+        for i, (atype, aval) in enumerate(self.env.action_to_element):
+            if atype == 'operator' and aval == op_to_add:
+                action_id = i
+                break
+        self.assertNotEqual(action_id, -1, f"Action for operator '{op_to_add}' not found.")
+
+        # Take the action
+        obs, reward, terminated, truncated, info = self.env.step(action_id)
+
+        # Verify root node
+        root = self.env.current_state.root
+        self.assertEqual(root.node_type, NodeType.OPERATOR, "Root node type should be OPERATOR after adding operator.")
+        self.assertEqual(root.value, op_to_add, f"Root node value should be '{op_to_add}'.")
+        self.assertEqual(len(root.children), 2, "Operator '+' should have 2 children.")
+        self.assertEqual(root.children[0].node_type, NodeType.EMPTY, "First child should be EMPTY.")
+        self.assertEqual(root.children[1].node_type, NodeType.EMPTY, "Second child should be EMPTY.")
+        self.assertEqual(root.children[0].depth, 1, "First child depth incorrect.")
+        self.assertEqual(root.children[1].depth, 1, "Second child depth incorrect.")
+
+        # Verify current_node (next empty node)
+        next_empty = self.env.current_state.get_next_empty_node()
+        self.assertIsNotNone(next_empty, "There should be a next empty node.")
+        self.assertEqual(next_empty, root.children[0], "Current node should point to the first child.")
+
+    def test_expression_completeness(self):
+        """Tests the is_complete() method of ExpressionNode and TreeState."""
+        # Case 1: Single constant
+        const_node = ExpressionNode(node_type=NodeType.CONSTANT, value=1.0)
+        self.assertTrue(const_node.is_complete(), "Single constant node should be complete.")
+        self.env.current_state.root = const_node
+        self.assertTrue(self.env.current_state.is_complete(), "TreeState with single constant root should be complete.")
+
+        # Case 2: Single variable
+        var_node = ExpressionNode(node_type=NodeType.VARIABLE, value=self.variables[0])
+        self.assertTrue(var_node.is_complete(), "Single variable node should be complete.")
+        self.env.current_state.root = var_node
+        self.assertTrue(self.env.current_state.is_complete(), "TreeState with single variable root should be complete.")
+
+        # Case 3: Operator with all operands filled
+        op_node_full = ExpressionNode(node_type=NodeType.OPERATOR, value='+')
+        child1_full = ExpressionNode(node_type=NodeType.CONSTANT, value=1.0, parent=op_node_full)
+        child2_full = ExpressionNode(node_type=NodeType.VARIABLE, value=self.variables[0], parent=op_node_full)
+        op_node_full.children = [child1_full, child2_full]
+        self.assertTrue(op_node_full.is_complete(), "Operator with all children filled should be complete.")
+        self.env.current_state.root = op_node_full
+        self.assertTrue(self.env.current_state.is_complete(), "TreeState with full operator root should be complete.")
+
+        # Case 4: Operator with one EMPTY child (binary op)
+        op_node_missing_one = ExpressionNode(node_type=NodeType.OPERATOR, value='+')
+        child_const = ExpressionNode(node_type=NodeType.CONSTANT, value=1.0, parent=op_node_missing_one)
+        child_empty = ExpressionNode(node_type=NodeType.EMPTY, value=None, parent=op_node_missing_one)
+        op_node_missing_one.children = [child_const, child_empty]
+        self.assertFalse(op_node_missing_one.is_complete(), "Operator with one empty child should be incomplete.")
+        self.env.current_state.root = op_node_missing_one
+        self.assertFalse(self.env.current_state.is_complete(), "TreeState with one empty child should be incomplete.")
+
+        # Case 5: Operator with one variable and one EMPTY (already covered by case 4 essentially)
+
+        # Case 6: An EMPTY root node
+        empty_root = ExpressionNode(node_type=NodeType.EMPTY, value=None)
+        self.assertFalse(empty_root.is_complete(), "Empty root node should be incomplete.")
+        self.env.current_state.root = empty_root
+        self.assertFalse(self.env.current_state.is_complete(), "TreeState with empty root should be incomplete.")
+
+        # Case 7: Operator with no children yet (should be incomplete)
+        op_node_no_children = ExpressionNode(node_type=NodeType.OPERATOR, value='+')
+        self.assertFalse(op_node_no_children.is_complete(), "Operator with no children should be incomplete.")
+        self.env.current_state.root = op_node_no_children
+        self.assertFalse(self.env.current_state.is_complete(), "TreeState with op no children root should be incomplete.")
+
 
 if __name__ == '__main__':
     unittest.main()

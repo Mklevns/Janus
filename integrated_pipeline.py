@@ -122,26 +122,82 @@ class JanusConfig(BaseSettings):
     
     # Reward configuration
     reward_config: RewardConfig = Field(default_factory=RewardConfig)
-    
-    # Additional fields from YAML
-    curriculum_stages: Optional[List[Dict]] = None
-    synthetic_data_params: Optional[Dict] = None
-    ray_config: Optional[Dict] = None
-    hyperparam_search: Optional[Dict] = None
+
+    # Curriculum and Synthetic Data
+    curriculum_stages: Optional[List[CurriculumStageConfig]] = None
+    synthetic_data_params: Optional[SyntheticDataParamsConfig] = None
+
+    # Distributed Training (Ray)
+    ray_config: Optional[RayConfig] = Field(default_factory=RayConfig) # Use the RayConfig model
+
+    # Hyperparameter Search (structure can be defined if stable)
+    hyperparam_search: Optional[Dict[str, Any]] = None
     validation_phases: Optional[List[str]] = None
     run_validation_suite: bool = False
-    
-    # Physics-specific features
-    enable_conservation_detection: bool = False
-    enable_symmetry_analysis: bool = False
-    enable_dimensional_analysis: bool = False
-    mine_abstractions_every: int = 5000
-    abstraction_min_frequency: int = 3
+
+    # --- Parameters often found in algo_params ---
+    # For PPO Policy (HypothesisNet)
+    policy_hidden_dim: int = 256
+    policy_encoder_type: str = 'transformer' # 'mlp', 'transformer', etc.
+
+    # For PPO Training loop
+    timesteps_per_eval_cycle: int = 1000
+    num_evaluation_cycles: int = 50
+    # Specific PPO training hyperparams (e.g., rollout_length, n_epochs, batch_size)
+    ppo_rollout_length: int = 512
+    ppo_n_epochs: int = 3
+    ppo_batch_size: int = 64
+    ppo_learning_rate: float = 3e-4
+    ppo_gamma: float = 0.99
+    ppo_gae_lambda: float = 0.95
+
+    # For Genetic Algorithm (SymbolicRegressor)
+    genetic_population_size: int = 100
+    genetic_generations: int = 50
+    # genetic_max_complexity is covered by top-level max_complexity
+
+    # For HypothesisTracker
+    tracker_autosave_interval: int = 100
+
+    # For ConservationBiasedReward
+    conservation_types: List[str] = Field(default_factory=lambda: ['energy', 'momentum'])
+    conservation_weight_factor: float = 0.3
+
+    # For PhysicsSymmetryDetector
+    symmetry_tolerance: float = 1e-4
+    symmetry_confidence_threshold: float = 0.7
+    expected_symmetries: List[str] = Field(default_factory=lambda: ['velocity_parity', 'time_reversal'])
+
+    # For Logging / Monitoring (specific to TrainingLogger/LiveMonitor)
+    logger_backends: List[str] = Field(default_factory=lambda: ["file", "memory"])
+    redis_host: str = 'localhost'
+    redis_port: int = 6379
+    # Base channel name, experiment name and run_id will be appended
+    redis_channel_base: str = 'janus_experiment_metrics'
+
+    # --- Parameters often found in env_params (for physics environments) ---
+    # These are specific to the physics env (e.g., 'k', 'm' for oscillator)
+    # It's often better to keep these as a flexible dict or load them dynamically
+    # based on `target_phenomena`. For now, a dict is suitable.
+    env_specific_params: Dict[str, Any] = Field(default_factory=dict)
+
+    # Strict mode for plugin loading and experiment execution
+    strict_mode: bool = False
+
+    # Physics-specific features (broader algorithm controls)
+    enable_conservation_detection: bool = False # For ConservationDetector tool
+    enable_symmetry_analysis: bool = False    # For PhysicsSymmetryDetector tool
+    enable_dimensional_analysis: bool = False # Placeholder for future feature
+    mine_abstractions_every: int = 5000       # For ProgressiveGrammar abstraction mining
+    abstraction_min_frequency: int = 3        # For ProgressiveGrammar abstraction mining
+
 
     @model_validator(mode='after')
     def set_default_emergence_analysis_dir(self) -> 'JanusConfig':
         if self.emergence_analysis_dir is None and self.results_dir is not None:
-            self.emergence_analysis_dir = f"{self.results_dir}/emergence"
+            # Ensure results_dir is a Path object for concatenation
+            base_path = Path(self.results_dir) if isinstance(self.results_dir, str) else self.results_dir
+            self.emergence_analysis_dir = str(base_path / "emergence")
         return self
 
     # Configuration for pydantic-settings
@@ -150,6 +206,12 @@ class JanusConfig(BaseSettings):
         extra='ignore',       # Ignore extra env vars not matching fields
         # case_sensitive=False, # Default
     )
+
+    @classmethod
+    def from_yaml(cls, file_path: str) -> 'JanusConfig':
+        with open(file_path, 'r') as f:
+            data = yaml.safe_load(f)
+        return cls(**data)
 
 
 class AdvancedJanusTrainer:
@@ -166,17 +228,25 @@ class AdvancedJanusTrainer:
         # Initialize components
         self.grammar = ProgressiveGrammar()
         self.variables = []
-        self.env = None
-        self.trainer = None
+        self.env = None # type: ignore # Will be SymbolicDiscoveryEnv or similar
+        self.trainer = None # type: ignore # Will be PPOTrainer or similar
         
         # Advanced components
-        self.league_manager = None
-        self.distributed_trainer = None
-        self.emergent_tracker = None
-        self.curriculum_manager = None
+        self.league_manager = None # type: ignore # Optional, from multiagent_selfplay
+        self.distributed_trainer = None # type: ignore # Optional, from distributed_training
+        self.emergent_tracker = None # type: ignore # Optional, from emergent_monitor
+        self.curriculum_manager = None # type: ignore # Optional
         
         # Initialize based on mode
         self._initialize_mode()
+
+        # Experiment runner for validation suite, configured with strict_mode
+        # This runner is used if self.run_experiment_suite() is called.
+        self.validation_experiment_runner = ExperimentRunner(
+            base_dir=self.config.results_dir, # Use existing results_dir
+            use_wandb=bool(self.config.wandb_project),
+            strict_mode=self.config.strict_mode # Pass strict_mode here
+        )
         
     def _setup_directories(self):
         """Create necessary directories."""
@@ -590,22 +660,25 @@ class AdvancedJanusTrainer:
         print("="*60)
         
         # Run comprehensive evaluation
-        experiment_config = ExperimentConfig(
-            name=f"final_eval_{self.config.target_phenomena}",
-            experiment_type='physics_discovery_example', # Added field
-            environment_type=self.config.target_phenomena,
-            algorithm='janus_full', # This will be used by the experiment's run method
-            env_params={},
-            noise_level=0.0,
-            max_experiments=1000,
-            n_runs=10
-        )
-        
-        runner = ExperimentRunner(
-            base_dir=self.config.results_dir,
-            use_wandb=bool(self.config.wandb_project)
-        )
-        
+        # The ExperimentRunner for validation is now self.validation_experiment_runner
+        # We need to create ExperimentConfig instances for it.
+        # This part might be better handled by run_experiment_suite or specific validation methods.
+        # For now, let's comment out direct ExperimentConfig creation here as it's complex
+        # and better suited for the experiment_runner script's validation functions.
+
+        # experiment_config = ExperimentConfig.from_janus_config(
+        # name=f"final_eval_{self.config.target_phenomena}",
+        # experiment_type='physics_discovery_example',
+        # janus_config=self.config, # Pass the full JanusConfig
+        # algorithm_name='janus_full', # Example
+        # n_runs=1 # Typically final eval is one detailed run
+        # )
+        #
+        # if self.validation_experiment_runner:
+        # self.validation_experiment_runner.run_single_experiment(experiment_config)
+        # else:
+        # print("⚠️ Validation experiment runner not initialized, skipping final evaluation run through it.")
+
         # Generate final report
         if self.emergent_tracker:
             report = self.emergent_tracker.generate_final_report()
@@ -644,67 +717,84 @@ class AdvancedJanusTrainer:
         print("\nRunning experiment suite...")
         
         # Phase 1: Known law rediscovery
+        # These functions are defined in experiment_runner.py and create their own ExperimentRunner.
+        # To pass strict_mode, we'd need to modify those functions or how they are called.
+        # For now, this trainer's self.validation_experiment_runner (with strict_mode)
+        # isn't directly used by these imported functions.
+        # This will be handled in launch_advanced_training.py for args.mode == 'validate'
+
+        phase1_results_df = None
+        phase2_results_df = None
         try:
-            from experiment_runner import run_phase1_validation
-            phase1_results = run_phase1_validation()
+            from experiment_runner import run_phase1_validation, run_phase2_robustness
+            # If these functions are to use the strict_mode from *this* trainer's config,
+            # they would need to accept it as an argument.
+            # For now, they will run with their default ExperimentRunner settings.
+            # If strict_mode is critical for these validation runs when triggered from AdvancedJanusTrainer,
+            # then run_phase1_validation etc. need a strict_mode param.
+            # This is addressed by how launch_advanced_training.py calls them.
+            if self.config.validation_phases and "phase1" in self.config.validation_phases:
+                print("\nRunning Phase 1 Validation (as part of AdvancedJanusTrainer suite)...")
+                phase1_results_df = run_phase1_validation(strict_mode_override=self.config.strict_mode)
+            if self.config.validation_phases and "phase2" in self.config.validation_phases:
+                print("\nRunning Phase 2 Robustness (as part of AdvancedJanusTrainer suite)...")
+                phase2_results_df = run_phase2_robustness(strict_mode_override=self.config.strict_mode)
+
         except ImportError as e:
-            print(f"⚠️  Could not run phase 1 validation: {e}")
-            phase1_results = None
-        
-        # Phase 2: Robustness testing
-        try:
-            from experiment_runner import run_phase2_robustness
-            phase2_results = run_phase2_robustness()
-        except ImportError as e:
-            print(f"⚠️  Could not run phase 2 robustness: {e}")
-            phase2_results = None
+            print(f"⚠️  Could not run validation suites: {e}")
         
         # Visualize results
-        if phase1_results is not None or phase2_results is not None:
+        if phase1_results_df is not None or phase2_results_df is not None:
             try:
                 from experiment_visualizer import ExperimentVisualizer
-                visualizer = ExperimentVisualizer(results_dir=self.config.results_dir)
+                visualizer = ExperimentVisualizer(results_dir=str(Path(self.config.results_dir) / "trainer_suite_viz"))
                 
-                # Create comprehensive plots
-                if phase1_results is not None:
-                    visualizer.plot_sample_efficiency_curves(phase1_results)
-                if phase2_results is not None:
-                    visualizer.plot_noise_resilience(phase2_results)
-                
-                # Generate HTML report
-                if phase1_results is not None and phase2_results is not None:
+                all_validation_results = []
+                if phase1_results_df is not None:
+                    all_validation_results.append(phase1_results_df)
+                if phase2_results_df is not None:
+                    all_validation_results.append(phase2_results_df)
+
+                if all_validation_results:
                     try:
                         import pandas as pd
-                        visualizer.create_summary_report(
-                            pd.concat([phase1_results, phase2_results]),
-                            output_path=Path(self.config.results_dir) / "experiment_report.html"
-                        )
-                        print(f"Experiment report saved to {self.config.results_dir}/experiment_report.html")
+                        final_df_for_report = pd.concat(all_validation_results)
+                        if not final_df_for_report.empty:
+                             visualizer.create_summary_report(
+                                final_df_for_report,
+                                output_path=Path(self.config.results_dir) / "trainer_validation_report.html"
+                            )
+                             print(f"Trainer validation report saved to {self.config.results_dir}/trainer_validation_report.html")
+                        else:
+                            print("⚠️  No data in final_df_for_report for visualization.")
                     except ImportError:
-                        print("⚠️  Pandas not installed. Skipping HTML report generation.")
+                        print("⚠️  Pandas not installed. Skipping HTML report generation for trainer suite.")
+                    except Exception as e_concat: # Catch errors during concat or report generation
+                        print(f"⚠️  Error generating combined report for trainer suite: {e_concat}")
+
             except ImportError:
-                print("⚠️  ExperimentVisualizer not available")
+                print("⚠️  ExperimentVisualizer not available for trainer suite.")
         else:
-            print("⚠️  No validation results to visualize")
+            print("⚠️  No validation results from trainer suite to visualize.")
 
 
 def main():
     """Main entry point for advanced Janus training."""
     
     # Load configuration
-    config_path = "config/advanced_training.yaml"
+    config_path = "config/advanced_training.yaml" # Default config path
+    # Allow overriding config path via an environment variable or simple argument if needed in future
+    # For now, sticking to the default.
+
+    loaded_config_data = {}
     if Path(config_path).exists():
-        config = JanusConfig.from_yaml(config_path)
-    else:
-        # Use default configuration
-        config = JanusConfig(
-            training_mode="advanced",
-            target_phenomena="harmonic_oscillator",
-            total_timesteps=500_000,
-            use_curriculum=True,
-            track_emergence=True
-        )
+        with open(config_path, 'r') as f:
+            loaded_config_data = yaml.safe_load(f)
     
+    # Create JanusConfig instance. This will also load from environment variables.
+    # YAML values take precedence if keys overlap with environment variables.
+    config = JanusConfig(**loaded_config_data)
+
     # Create trainer
     trainer = AdvancedJanusTrainer(config)
     
