@@ -193,21 +193,44 @@ def add_intrinsic_rewards_to_env(env: SymbolicDiscoveryEnv,
     # Define enhanced step
     def enhanced_step(self, action):
         obs, reward, terminated, truncated, info = self._original_step(action)
-        
-        if terminated and 'expression' in info:
-            # Calculate intrinsic reward
-            enhanced_reward = self._intrinsic_calculator.calculate_intrinsic_reward(
-                expression=info['expression'],
-                complexity=info.get('complexity', 0),
-                extrinsic_reward=reward,
-                # FIX: Add the missing arguments
-                embedding=None,  # Pass None as a placeholder for the embedding
-                data=self.target_data,
-                variables=self.variables
-            )
+        original_reward = reward # Store original reward
+
+        if terminated: # Process regardless of 'expression' in info initially
+            expression = info.get('expression', '')
+            complexity = info.get('complexity', 0)
+
+            embedding = None
+            if hasattr(self, '_last_tree_embedding'):
+                embedding = self._last_tree_embedding
+            elif 'tree_structure' in info and hasattr(self._intrinsic_calculator, 'compute_embedding'):
+                try:
+                    embedding = self._intrinsic_calculator.compute_embedding(info['tree_structure'])
+                except Exception as e:
+                    print(f"Error computing embedding: {e}") # Log error
+                    embedding = None
             
-            info['intrinsic_bonus'] = enhanced_reward - reward
-            reward = enhanced_reward
+            data = getattr(self, 'target_data', None)
+            variables = getattr(self, 'variables', [])
+
+            try:
+                enhanced_reward = self._intrinsic_calculator.calculate_intrinsic_reward(
+                    expression=expression,
+                    complexity=complexity,
+                    extrinsic_reward=original_reward, # Use original_reward here
+                    embedding=embedding,
+                    data=data,
+                    variables=variables
+                )
+
+                # Update info dictionary
+                info['intrinsic_reward'] = enhanced_reward - original_reward
+                info['original_reward'] = original_reward
+                reward = enhanced_reward # Use enhanced reward
+
+            except Exception as e:
+                print(f"Error calculating intrinsic reward: {e}") # Log error
+                # In case of error, use original reward, info already reflects original
+                reward = original_reward
         
         return obs, reward, terminated, truncated, info
     
