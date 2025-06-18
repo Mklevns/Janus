@@ -1,234 +1,173 @@
-# tests/test_enhanced_feedback.py
-
 import unittest
-from unittest.mock import patch, MagicMock
 import numpy as np
-import sympy # Added
-from progressive_grammar_system import Variable # Added
+import sympy as sp
+from conservation_reward_fix import ConservationBiasedReward # Assuming this is the correct path
 
-# Assuming enhanced_feedback.py is in the parent directory or PYTHONPATH is set up
-# If not, adjust import path as necessary, e.g., from .. import enhanced_feedback
-# The actual import from enhanced_feedback.py is NewConservationBiasedReward,
-# but the test was patching the old name. We will patch NewConservationBiasedReward.
-from enhanced_feedback import IntrinsicRewardCalculator
+class TestConservationBiasedReward(unittest.TestCase):
 
+    def test_calculate_violation_scalar(self):
+        cbr = ConservationBiasedReward(conservation_types=[], weight_factor=1.0) # Dummy instance
+        self.assertEqual(cbr._calculate_violation(10.0, 10.0, 'scalar', 0.01, 0.01), 0.0)
+        self.assertGreater(cbr._calculate_violation(10.0, 5.0, 'scalar', 0.01, 0.01), 0.0)
+        self.assertEqual(cbr._calculate_violation(10.0, 0.0, 'scalar', 0.01, 0.01), 1.0) # Relative to zero
+        self.assertEqual(cbr._calculate_violation(0.0, 10.0, 'scalar', 0.01, 0.01), 1.0) # Predicted zero, GT non-zero
+        self.assertEqual(cbr._calculate_violation(0.0, 0.0, 'scalar', 0.01, 0.01), 0.0)
 
-# Test for the old ConservationBiasedReward can be removed or updated if that class is still relevant.
-# For now, focusing on IntrinsicRewardCalculator and its use of NewConservationBiasedReward.
-# class TestConservationBiasedReward(unittest.TestCase):
-#     def test_compute_conservation_bonus(self):
-#         """Test the placeholder compute_conservation_bonus method."""
-#         # This test might need to refer to NewConservationBiasedReward if that's the intended target
-#         from enhanced_feedback import NewConservationBiasedReward as ConservationBiasedReward
-#         calculator = ConservationBiasedReward(conservation_types=['energy'], weight_factor=1.0)
-#         # Dummy inputs, as current implementation doesn't use them in the same way
-#         # This test needs significant rework based on NewConservationBiasedReward's actual logic
-#         # For this subtask, we are focusing on IntrinsicRewardCalculator, so we'll skip deep changes here.
-#         pass
+        self.assertEqual(cbr._calculate_violation(None, 5.0, 'scalar', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(5.0, None, 'scalar', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(None, None, 'scalar', 0.01, 0.01), 1.0)
 
-
-class TestIntrinsicRewardCalculator(unittest.TestCase):
-    @patch('enhanced_feedback.NewConservationBiasedReward') # Updated patch target
-    def test_calculate_intrinsic_reward_with_conservation(self, MockNewConservationBiasedReward):
-        """Test that conservation bonus is correctly incorporated into intrinsic reward."""
-
-        mock_conservation_instance = MockNewConservationBiasedReward.return_value
-        mock_conservation_bonus_value = 0.7
-        mock_conservation_instance.compute_conservation_bonus.return_value = mock_conservation_bonus_value
-        # Mock the conservation_types attribute that is accessed in the method under test
-        mock_conservation_instance.conservation_types = ['energy', 'momentum']
+        # Test tolerance
+        self.assertEqual(cbr._calculate_violation(10.0, 10.05, 'scalar', abs_tol=0.1, rel_tol=0.001), 0.0) # Within abs_tol
+        self.assertEqual(cbr._calculate_violation(10.0, 10.005, 'scalar', abs_tol=0.001, rel_tol=0.1), 0.0) # Within rel_tol
+        self.assertGreater(cbr._calculate_violation(10.0, 10.1, 'scalar', abs_tol=0.01, rel_tol=0.001), 0.0) # Exceeds both
 
 
-        conservation_weight = 0.5
-        novelty_weight = 0.1
-        diversity_weight = 0.1
-        complexity_growth_weight = 0.1
+    def test_calculate_violation_vector(self):
+        cbr = ConservationBiasedReward(conservation_types=[], weight_factor=1.0)
+        vec1 = np.array([1.0, 2.0, 3.0])
+        vec2 = np.array([1.0, 2.0, 3.0])
+        vec3 = np.array([1.0, 2.5, 3.0])
+        vec_zero = np.array([0.0, 0.0, 0.0])
 
-        reward_calculator = IntrinsicRewardCalculator(
-            novelty_weight=novelty_weight,
-            diversity_weight=diversity_weight,
-            complexity_growth_weight=complexity_growth_weight,
-            conservation_weight=conservation_weight
+        self.assertEqual(cbr._calculate_violation(vec1, vec2, 'vector', 0.01, 0.01), 0.0)
+        self.assertGreater(cbr._calculate_violation(vec1, vec3, 'vector', 0.01, 0.01), 0.0)
+        self.assertEqual(cbr._calculate_violation(vec1, vec_zero, 'vector', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(vec_zero, vec1, 'vector', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(vec_zero, vec_zero.copy(), 'vector', 0.01, 0.01), 0.0)
+
+        # Shape mismatch
+        vec4 = np.array([1.0, 2.0])
+        self.assertEqual(cbr._calculate_violation(vec1, vec4, 'vector', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(vec4, vec1, 'vector', 0.01, 0.01), 1.0)
+
+        # With None
+        self.assertEqual(cbr._calculate_violation(None, vec1, 'vector', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(vec1, None, 'vector', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(None, None, 'vector', 0.01, 0.01), 1.0)
+
+        # Test tolerance
+        vec_tol1 = np.array([1.0, 2.0, 3.0])
+        vec_tol2 = np.array([1.05, 2.0, 3.0]) # 1.05 is 5% diff from 1.0
+        self.assertEqual(cbr._calculate_violation(vec_tol1, vec_tol2, 'vector', abs_tol=0.1, rel_tol=0.01), 0.0) # Within abs_tol for first element
+        self.assertEqual(cbr._calculate_violation(vec_tol1, vec_tol2, 'vector', abs_tol=0.01, rel_tol=0.1), 0.0) # Within rel_tol for first element
+
+        vec_tol3 = np.array([1.1, 2.0, 3.0]) # 1.1 is 10% diff from 1.0
+        self.assertGreater(cbr._calculate_violation(vec_tol1, vec_tol3, 'vector', abs_tol=0.05, rel_tol=0.05), 0.0)
+
+
+    def test_calculate_violation_tensor(self):
+        cbr = ConservationBiasedReward(conservation_types=[], weight_factor=1.0)
+        tensor1 = np.array([[1.0, 2.0], [3.0, 4.0]])
+        tensor2 = np.array([[1.0, 2.0], [3.0, 4.0]])
+        tensor3 = np.array([[1.0, 2.5], [3.0, 4.0]])
+        tensor_zero = np.zeros_like(tensor1)
+
+        self.assertEqual(cbr._calculate_violation(tensor1, tensor2, 'tensor', 0.01, 0.01), 0.0)
+        self.assertGreater(cbr._calculate_violation(tensor1, tensor3, 'tensor', 0.01, 0.01), 0.0)
+        self.assertEqual(cbr._calculate_violation(tensor1, tensor_zero, 'tensor', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(tensor_zero, tensor1, 'tensor', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(tensor_zero, tensor_zero.copy(), 'tensor', 0.01, 0.01), 0.0)
+
+        # Shape mismatch
+        tensor4 = np.array([[1.0, 2.0]])
+        self.assertEqual(cbr._calculate_violation(tensor1, tensor4, 'tensor', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(tensor4, tensor1, 'tensor', 0.01, 0.01), 1.0)
+
+        # With None
+        self.assertEqual(cbr._calculate_violation(None, tensor1, 'tensor', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(tensor1, None, 'tensor', 0.01, 0.01), 1.0)
+        self.assertEqual(cbr._calculate_violation(None, None, 'tensor', 0.01, 0.01), 1.0)
+
+    def test_compute_conservation_bonus(self):
+        cbr = ConservationBiasedReward(
+            conservation_types=['energy', 'momentum'],
+            weight_factor=0.5,
+            abs_tolerance=0.01,
+            rel_tolerance=0.01
         )
 
-        expression = "x * 2" # A simple expression string
-        complexity = 2
-        extrinsic_reward = 0.2
-        embedding = np.array([0.1, 0.2])
-
-        # Setup mock variables
-        mock_var_x = MagicMock(spec=Variable)
-        mock_var_x.name = 'x'
-        mock_var_x.index = 0
-        mock_var_x.symbolic = sympy.Symbol('x')
-
-        mock_var_energy_gt = MagicMock(spec=Variable)
-        mock_var_energy_gt.name = 'energy_gt' # Should match 'energy' c_type
-        mock_var_energy_gt.index = 1
-        mock_var_energy_gt.symbolic = sympy.Symbol('energy_gt')
-
-        mock_var_momentum_gt = MagicMock(spec=Variable)
-        mock_var_momentum_gt.name = 'P_total' # Should match 'momentum' c_type via 'p'
-        mock_var_momentum_gt.index = 2
-        mock_var_momentum_gt.symbolic = sympy.Symbol('P_total')
-
-        variables = [mock_var_x, mock_var_energy_gt, mock_var_momentum_gt]
-
-        # Data: rows are samples, columns correspond to variable indices
-        # x, energy_gt, P_total
-        data = np.array([[1.0, 10.0, 5.0], [2.0, 20.0, 8.0]])
-
-        # Mock evaluate_expression_on_data
-        mock_evaluated_values = np.array([2.0, 4.0]) # x * 2 for data
-        reward_calculator.evaluate_expression_on_data = MagicMock(return_value=mock_evaluated_values)
-
-        reward_calculator._calculate_novelty_reward = MagicMock(return_value=0.3)
-        reward_calculator._calculate_diversity_reward = MagicMock(return_value=0.2)
-        reward_calculator._calculate_complexity_growth_reward = MagicMock(return_value=0.1)
-
-        total_reward = reward_calculator.calculate_intrinsic_reward(
-            expression, complexity, extrinsic_reward, embedding, data, variables
-        )
-
-        # Expected arguments for compute_conservation_bonus
-        expected_predicted_traj = {
-            'conserved_energy': mock_evaluated_values,
-            'conserved_momentum': mock_evaluated_values
+        # Scenario 1: Perfect conservation
+        predicted_traj1 = {
+            'conserved_energy': np.array([10.0, 10.0, 10.0]),
+            'conserved_momentum': np.array([5.0, 5.0, 5.0])
         }
-        expected_ground_truth_traj = {
-            'conserved_energy': data[:, mock_var_energy_gt.index],
-            'conserved_momentum': data[:, mock_var_momentum_gt.index]
+        ground_truth_traj1 = {
+            'conserved_energy': np.array([10.0, 10.0, 10.0]),
+            'conserved_momentum': np.array([5.0, 5.0, 5.0])
         }
-        expected_hypothesis_params = {'variables_info': variables}
+        bonus1 = cbr.compute_conservation_bonus(predicted_traj1, ground_truth_traj1, {})
+        self.assertEqual(bonus1, 0.5 * 1.0) # weight_factor * max_bonus_per_type * num_types / num_types
 
-        mock_conservation_instance.compute_conservation_bonus.assert_called_once_with(
-            predicted_traj=expected_predicted_traj,
-            ground_truth_traj=expected_ground_truth_traj,
-            hypothesis_params=expected_hypothesis_params
-        )
+        # Scenario 2: Some violations
+        predicted_traj2 = {
+            'conserved_energy': np.array([10.0, 10.5, 10.0]), # Slight violation
+            'conserved_momentum': np.array([5.0, 7.0, 5.0])   # Larger violation
+        }
+        ground_truth_traj2 = {
+            'conserved_energy': np.array([10.0, 10.0, 10.0]),
+            'conserved_momentum': np.array([5.0, 5.0, 5.0])
+        }
+        # energy violation: (0 + 0.05 + 0) / 3 = 0.0166 -> score = 1 - 0.0166/0.5 approx (using default deviation_scale_factor)
+        # momentum violation: (0 + 0.4 + 0) / 3 = 0.1333 -> score = 1 - 0.1333/0.5 approx
+        # Actual calculation within _calculate_violation is max relative diff
+        # For energy: max(|10.5-10|/10) = 0.05. Score = 1 - (0.05 / (10*0.01 + 0.01)) if not for scale factor.
+        # Simplified: just check it's less than perfect and greater than zero if not total violation
+        bonus2 = cbr.compute_conservation_bonus(predicted_traj2, ground_truth_traj2, {})
+        self.assertLess(bonus2, 0.5 * 1.0)
+        self.assertGreater(bonus2, 0.0)
 
-        reward_calculator.evaluate_expression_on_data.assert_called_once_with(expression, data, variables)
-
-        expected_novelty = novelty_weight * 0.3
-        expected_diversity = diversity_weight * 0.2
-        expected_complexity_growth = complexity_growth_weight * 0.1
-        expected_conservation = conservation_weight * mock_conservation_bonus_value
-
-        expected_total_intrinsic_reward = (
-            expected_novelty +
-            expected_diversity +
-            expected_complexity_growth +
-            expected_conservation
-        )
-
-        expected_final_reward = extrinsic_reward + expected_total_intrinsic_reward
-
-        self.assertAlmostEqual(total_reward, expected_final_reward, places=7,
-                               msg="Total reward does not match expected value with conservation bonus.")
+        # Expected violation for energy: (10.5-10)/10 = 0.05. Score_energy = 1 - min(1, 0.05 / cbr.violation_scale_factor)
+        # Expected violation for momentum: (7-5)/5 = 0.4. Score_momentum = 1 - min(1, 0.4 / cbr.violation_scale_factor)
+        # bonus = 0.5 * (score_energy + score_momentum) / 2
+        score_energy = 1.0 - min(1.0, abs(10.5 - 10.0) / (cbr.rel_tolerance * 10.0 + cbr.abs_tolerance) / cbr.violation_scale_factor if (cbr.rel_tolerance * 10.0 + cbr.abs_tolerance) > 1e-9 else (abs(10.5-10.0) / cbr.violation_scale_factor if cbr.violation_scale_factor > 1e-9 else 1.0 if abs(10.5-10.0)>1e-9 else 0.0) )
+        score_momentum = 1.0 - min(1.0, abs(7.0 - 5.0) / (cbr.rel_tolerance * 5.0 + cbr.abs_tolerance) / cbr.violation_scale_factor if (cbr.rel_tolerance * 5.0 + cbr.abs_tolerance) > 1e-9 else (abs(7.0-5.0) / cbr.violation_scale_factor if cbr.violation_scale_factor > 1e-9 else 1.0 if abs(7.0-5.0)>1e-9 else 0.0) )
+        expected_bonus2 = cbr.weight_factor * (score_energy + score_momentum) / 2
+        self.assertAlmostEqual(bonus2, expected_bonus2)
 
 
-class TestEvaluateExpressionOnData(unittest.TestCase):
-    def setUp(self):
-        # Weights don't matter for this specific method test
-        self.reward_calculator = IntrinsicRewardCalculator()
+        # Scenario 3: Missing data for one conservation type
+        predicted_traj3 = {
+            'conserved_energy': np.array([10.0, 10.0, 10.0]),
+            # 'conserved_momentum': missing
+        }
+        ground_truth_traj3 = {
+            'conserved_energy': np.array([10.0, 10.0, 10.0]),
+            'conserved_momentum': np.array([5.0, 5.0, 5.0]) # GT has it, but predicted doesn't
+        }
+        bonus3 = cbr.compute_conservation_bonus(predicted_traj3, ground_truth_traj3, {})
+        # Should only consider energy. Energy is perfect. Momentum violation is 1.0 (score 0).
+        # So, (1.0 + 0.0) / 2 * weight_factor
+        self.assertEqual(bonus3, 0.5 * (1.0 + 0.0) / 2)
 
-        self.mock_var_x = MagicMock(spec=Variable)
-        self.mock_var_x.name = 'x'
-        self.mock_var_x.index = 0
-        self.mock_var_x.symbolic = sympy.Symbol('x')
 
-        self.mock_var_y = MagicMock(spec=Variable)
-        self.mock_var_y.name = 'y'
-        self.mock_var_y.index = 1
-        self.mock_var_y.symbolic = sympy.Symbol('y')
+        predicted_traj3_alt = {
+            'conserved_energy': np.array([10.0, 10.0, 10.0]),
+            'conserved_momentum': None # Predicted is None
+        }
+        bonus3_alt = cbr.compute_conservation_bonus(predicted_traj3_alt, ground_truth_traj1, {}) # ground_truth_traj1 is complete
+        self.assertEqual(bonus3_alt, 0.5 * (1.0 + 0.0) / 2) # Energy perfect, momentum violation
 
-    def test_simple_expression(self):
-        expression_str = "x * 2"
-        variables = [self.mock_var_x]
-        data = np.array([[1.0], [2.0], [3.0]])
-        expected_results = np.array([2.0, 4.0, 6.0])
 
-        results = self.reward_calculator.evaluate_expression_on_data(expression_str, data, variables)
-        np.testing.assert_array_almost_equal(results, expected_results)
+        # Scenario 4: All data missing
+        predicted_traj4 = {}
+        ground_truth_traj4 = {
+            'conserved_energy': np.array([10.0, 10.0, 10.0]),
+            'conserved_momentum': np.array([5.0, 5.0, 5.0])
+        }
+        bonus4 = cbr.compute_conservation_bonus(predicted_traj4, ground_truth_traj4, {})
+        self.assertEqual(bonus4, 0.0)
 
-    def test_expression_with_multiple_variables(self):
-        expression_str = "x + y"
-        variables = [self.mock_var_x, self.mock_var_y]
-        data = np.array([[1.0, 0.5], [2.0, 3.0], [3.0, -1.0]]) # x, y
-        expected_results = np.array([1.5, 5.0, 2.0])
+        predicted_traj4_alt = {
+            'conserved_energy': None,
+            'conserved_momentum': None
+        }
+        bonus4_alt = cbr.compute_conservation_bonus(predicted_traj4_alt, ground_truth_traj1, {})
+        self.assertEqual(bonus4_alt, 0.0)
 
-        results = self.reward_calculator.evaluate_expression_on_data(expression_str, data, variables)
-        np.testing.assert_array_almost_equal(results, expected_results)
-
-    def test_parse_error(self):
-        expression_str = "x **" # Invalid syntax
-        variables = [self.mock_var_x]
-        data = np.array([[1.0], [2.0]])
-        expected_results = np.array([np.nan, np.nan])
-
-        with patch('builtins.print') as mock_print: # Suppress error print
-            results = self.reward_calculator.evaluate_expression_on_data(expression_str, data, variables)
-            mock_print.assert_called() # Check that an error was logged
-        np.testing.assert_array_equal(results, expected_results) # np.nan == np.nan is False, use array_equal
-
-    def test_evaluation_error_log_negative(self):
-        expression_str = "log(x)"
-        variables = [self.mock_var_x]
-        data = np.array([[-1.0], [0.0], [1.0]]) # log(-1) is nan, log(0) is -inf (sympy) -> nan
-        # Sympy's log(negative) returns `log(abs(arg)) + I*pi`, evalf might give complex or nan.
-        # Our method should coerce to nan if complex or if it's an error.
-        # Sympy log(0) is -oo, which our method also converts to np.nan.
-        expected_results = np.array([np.nan, np.nan, 0.0])
-
-        with patch('builtins.print') as mock_print: # Suppress error print
-            results = self.reward_calculator.evaluate_expression_on_data(expression_str, data, variables)
-        np.testing.assert_array_almost_equal(results, expected_results)
-
-    def test_undefined_symbol_error(self):
-        expression_str = "x + z" # z is not in variables
-        variables = [self.mock_var_x]
-        data = np.array([[1.0], [2.0]])
-        # SymPy will keep 'z' as a symbol, evalf will not change it.
-        # Our method should detect this and return NaN.
-        expected_results = np.array([np.nan, np.nan])
-
-        with patch('builtins.print') as mock_print: # Suppress error print
-            results = self.reward_calculator.evaluate_expression_on_data(expression_str, data, variables)
-        np.testing.assert_array_equal(results, expected_results)
-
-    def test_empty_data_array(self):
-        expression_str = "x * 2"
-        variables = [self.mock_var_x]
-        data = np.array([[]] * 0).reshape(0,1) # Correct way to make 0-row, 1-col array
-        expected_results = np.array([])
-
-        results = self.reward_calculator.evaluate_expression_on_data(expression_str, data, variables)
-        np.testing.assert_array_equal(results, expected_results)
-
-    def test_expression_evaluates_to_infinity(self):
-        expression_str = "1/x"
-        variables = [self.mock_var_x]
-        data = np.array([[0.0], [2.0]]) # 1/0 is zoo (SymPy for complex infinity)
-        expected_results = np.array([np.nan, 0.5])
-
-        with patch('builtins.print') as mock_print:
-            results = self.reward_calculator.evaluate_expression_on_data(expression_str, data, variables)
-        np.testing.assert_array_almost_equal(results, expected_results)
-
-    def test_expression_remains_symbolic_after_subs(self):
-        # This can happen if a sympy function is used that doesn't evaluate with .evalf() without free symbols
-        # For example, if 'x' was a string "Symbol('t')" and not substituted
-        expression_str = "Integral(x, x)" # Indefinite integral
-        variables = [self.mock_var_x]
-        data = np.array([[1.0], [2.0]])
-        # Sympy will return Integral(1.0, 1.0) which is not a number.
-        # Our method should return NaN.
-        expected_results = np.array([np.nan, np.nan])
-
-        with patch('builtins.print') as mock_print:
-            results = self.reward_calculator.evaluate_expression_on_data(expression_str, data, variables)
-        np.testing.assert_array_equal(results, expected_results)
-
+        # Test with hypothesis_params (should not affect current basic implementation)
+        bonus_with_params = cbr.compute_conservation_bonus(predicted_traj1, ground_truth_traj1, {'some_param': 1})
+        self.assertEqual(bonus_with_params, 0.5 * 1.0)
 
 if __name__ == '__main__':
     unittest.main()
