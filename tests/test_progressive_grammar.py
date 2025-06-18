@@ -1241,3 +1241,58 @@ def test_denoise_fallback_to_simple(mock_simple_denoise):
         processor.denoise(observations_small)
         mock_simple_denoise.assert_called_once_with(observations_small)
         mock_build_autoencoder.assert_not_called()
+
+# --- Tests for Expression Division by Zero ---
+import unittest
+
+class TestExpressionDivisionByZero(unittest.TestCase):
+    def test_expression_division_by_numeric_zero(self):
+        expr = Expression('/', [Expression('const', [1]), Expression('const', [0])])
+        self.assertTrue(sp.sympify(expr.symbolic).is_nan)
+
+    def test_expression_division_by_symbolic_zero(self):
+        # This test assumes that Expression('var', ['x']) when x=0 is not simplified to const 0
+        # by the Expression class itself before _to_sympy is called.
+        # The fix is for _to_sympy's handling of explicit zero in denominator.
+        zero_expr_val = Expression('*', [Expression('const', [0]), Expression('var', ['x'])])
+        # zero_expr_val.symbolic should be sp.Integer(0) or sp.Float(0.0)
+        div_expr = Expression('/', [Expression('const', [1]), zero_expr_val])
+        self.assertTrue(sp.sympify(div_expr.symbolic).is_nan)
+
+    def test_expression_division_by_symbolic_variable_that_is_zero(self):
+        z = sp.Symbol('z')
+        # Create an expression representing 1/z
+        var_expr = Expression('var', ['z'])
+        div_expr = Expression('/', [Expression('const', [1]), var_expr])
+
+        # When we substitute z=0 into the sympy expression 1/z, sympy returns zoo (infinity)
+        # This is standard Sympy behavior and is not what the fix targets.
+        # The fix targets cases where an Expression object representing 0 is the denominator
+        # during the _to_sympy conversion.
+        res_sympy_behavior = div_expr.symbolic.subs({z: 0})
+        self.assertEqual(res_sympy_behavior, sp.zoo)
+
+        # To test the fix more directly for a Variable that *becomes* zero in context,
+        # we'd need a more complex setup where a Variable's value is resolved to zero
+        # during expression construction, or the Variable itself is defined as zero.
+        # The current fix in _to_sympy for `denominator.is_zero` primarily addresses
+        # explicit `Expression('const', [0])` or simple symbolic expressions that SymPy
+        # can immediately evaluate to zero (like `0*x`).
+
+        # If a Variable object could somehow have a .is_zero property that _to_sympy could check,
+        # that would be a different scenario.
+        # For now, the primary check is that an Expression object that evaluates to zero
+        # as a denominator leads to NaN.
+
+        # Let's try to create Expression('var', ['z_is_zero']) where 'z_is_zero' is conceptually zero.
+        # The Expression class doesn't hold actual values for variables during _to_sympy,
+        # it just creates sp.Symbol('z_is_zero'). So 1/sp.Symbol('z_is_zero') is the result.
+        # The .is_zero check relies on sympy's .is_zero for symbolic expressions.
+        # sp.Symbol('z_is_zero').is_zero is False.
+
+        # The most direct test for the fix is already covered by test_expression_division_by_numeric_zero
+        # and test_expression_division_by_symbolic_zero (where symbolic_zero is like 0*x).
+
+if __name__ == '__main__':
+    pytest.main() # To run pytest tests if this file is executed
+    unittest.main() # To run unittest tests if this file is executed

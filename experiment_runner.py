@@ -1,3 +1,4 @@
+import re
 """
 ExperimentRunner: Automated Validation Framework for Janus (Refactored for StrictMode)
 ==========================================================
@@ -748,12 +749,7 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
         # Sort variables by length of the key (e.g., 'x10' before 'x1') to prevent partial replacements.
         sorted_vars = sorted(var_mapping.items(), key=lambda item: len(item[0]), reverse=True)
         for new_var, orig_var in sorted_vars:
-            # This simple replacement should be fine for 'x0', 'x1', etc. as they are distinct tokens.
-            # If original variable names could be substrings of temp names or vice-versa in complex ways,
-            # or if temp names are not distinct tokens (e.g. 'x' and 'x_temp'),
-            # a more robust regex-based replacement (e.g. using word boundaries) would be needed.
-            # For now, assuming 'x0', 'x1' are safe.
-            result = result.replace(new_var, orig_var)
+            result = re.sub(r'' + re.escape(new_var) + r'', orig_var, result)
         return result
 
     def run(self, run_id: int) -> ExperimentResult:

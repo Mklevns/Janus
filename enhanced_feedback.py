@@ -20,26 +20,6 @@ from progressive_grammar_system import Expression, Variable # Added Variable
 from conservation_reward_fix import ConservationBiasedReward as NewConservationBiasedReward
 
 
-# class ConservationBiasedReward:
-#     """Calculates a reward bonus based on conservation principles."""
-#     def compute_conservation_bonus(self, expression: str, data: np.ndarray, variables: List[Any]) -> float:
-#         """
-#         Computes a bonus score if the expression adheres to known conservation laws.
-#         Placeholder implementation.
-
-#         Args:
-#             expression: The symbolic expression string.
-#             data: The training data.
-#             variables: A list of variable objects/descriptors.
-
-#         Returns:
-#             A float representing the conservation bonus.
-#         """
-#         # TODO: Implement actual conservation law checking logic
-#         # For now, returning a constant value
-#         return 0.5
-
-
 class IntrinsicRewardCalculator:
     """Calculate intrinsic rewards based on novelty and discovery value."""
     
