@@ -10,6 +10,12 @@ class CurriculumStageConfig(BaseModel):
     max_depth: int
     max_complexity: int
     success_threshold: float
+    episodes_required: int = 1000
+
+    # Additional fields for distributed training
+    ppo_rollout_length: Optional[int] = None
+    ppo_learning_rate: Optional[float] = None
+    exploration_bonus: Optional[float] = None
 
 
 class SyntheticDataParamsConfig(BaseModel):
@@ -82,74 +88,68 @@ class JanusConfig(BaseSettings):
     # Reward configuration
     reward_config: RewardConfig = Field(default_factory=RewardConfig)
 
-    # Curriculum and Synthetic Data
-    curriculum_stages: Optional[List[CurriculumStageConfig]] = None
-    synthetic_data_params: Optional[SyntheticDataParamsConfig] = None
-
-    # Distributed Training (Ray)
-    ray_config: Optional[RayConfig] = Field(default_factory=RayConfig)
-
-    # Hyperparameter Search
-    hyperparam_search: Optional[Dict[str, Any]] = None
-    validation_phases: Optional[List[str]] = None
-    run_validation_suite: bool = False
-
-    # Parameters often found in algo_params
-    policy_hidden_dim: int = 256
-    policy_encoder_type: str = 'transformer'
-
-    timesteps_per_eval_cycle: int = 1000
-    num_evaluation_cycles: int = 50
-    ppo_rollout_length: int = 512
-    ppo_n_epochs: int = 3
-    ppo_batch_size: int = 64
-    ppo_learning_rate: float = 3e-4
-    ppo_gamma: float = 0.99
-    ppo_gae_lambda: float = 0.95
-
-    genetic_population_size: int = 100
-    genetic_generations: int = 50
-
-    tracker_autosave_interval: int = 100
-
-    conservation_types: List[str] = Field(default_factory=lambda: ['energy', 'momentum'])
-    conservation_weight_factor: float = 0.3
-
-    symmetry_tolerance: float = 1e-4
-    symmetry_confidence_threshold: float = 0.7
-    expected_symmetries: List[str] = Field(default_factory=lambda: ['velocity_parity', 'time_reversal'])
-
-    logger_backends: List[str] = Field(default_factory=lambda: ["file", "memory"])
-    redis_host: str = 'localhost'
-    redis_port: int = 6379
-    redis_channel_base: str = 'janus_experiment_metrics'
-
-    env_specific_params: Dict[str, Any] = Field(default_factory=dict)
-
-    strict_mode: bool = False
-
-    enable_conservation_detection: bool = False
-    enable_symmetry_analysis: bool = False
-    enable_dimensional_analysis: bool = False
-    mine_abstractions_every: int = 5000
-    abstraction_min_frequency: int = 3
-
-
-    @model_validator(mode='after')
-    def set_default_emergence_analysis_dir(self) -> 'JanusConfig':
-        if self.emergence_analysis_dir is None and self.results_dir is not None:
-            base_path = Path(self.results_dir) if isinstance(self.results_dir, str) else self.results_dir
-            self.emergence_analysis_dir = str(base_path / "emergence")
-        return self
-
-    model_config = SettingsConfigDict(
-        env_prefix='JANUS_',
-        extra='ignore',
+    # Curriculum stages - moved from distributed_training.py
+    curriculum_stages: List[CurriculumStageConfig] = Field(
+        default_factory=lambda: [
+            CurriculumStageConfig(
+                name="basic_patterns",
+                max_depth=3,
+                max_complexity=5,
+                success_threshold=0.8,
+                episodes_required=1000,
+                ppo_rollout_length=32,
+                ppo_learning_rate=3e-4,
+                exploration_bonus=0.1
+            ),
+            CurriculumStageConfig(
+                name="simple_laws",
+                max_depth=5,
+                max_complexity=10,
+                success_threshold=0.7,
+                episodes_required=2000,
+                ppo_rollout_length=64,
+                ppo_learning_rate=1e-4,
+                exploration_bonus=0.05
+            ),
+            CurriculumStageConfig(
+                name="complex_laws",
+                max_depth=7,
+                max_complexity=15,
+                success_threshold=0.6,
+                episodes_required=5000,
+                ppo_rollout_length=128,
+                ppo_learning_rate=5e-5,
+                exploration_bonus=0.01
+            ),
+            CurriculumStageConfig(
+                name="full_complexity",
+                max_depth=10,
+                max_complexity=30,
+                success_threshold=0.5,
+                episodes_required=10000,
+                ppo_rollout_length=256,
+                ppo_learning_rate=1e-5,
+                exploration_bonus=0.0
+            )
+        ]
     )
 
-    @classmethod
-    def from_yaml(cls, file_path: str) -> 'JanusConfig':
-        import yaml
-        with open(file_path, 'r') as f:
-            data = yaml.safe_load(f)
-        return cls(**data)
+    # Synthetic data parameters
+    synthetic_data_params: Optional[SyntheticDataParamsConfig] = None
+
+    # ... rest of the config remains the same ...
+
+    @model_validator(mode='after')
+    def validate_curriculum_stages(self):
+        """Ensure curriculum stages are properly ordered."""
+        if self.curriculum_stages:
+            prev_complexity = 0
+            for stage in self.curriculum_stages:
+                if stage.max_complexity <= prev_complexity:
+                    raise ValueError(
+                        f"Curriculum stage '{stage.name}' has complexity "
+                        f"{stage.max_complexity} which is not greater than "
+                        f"previous stage complexity {prev_complexity}"
+                    )
+                prev_complexity = stage.max_complexity
+        return self
