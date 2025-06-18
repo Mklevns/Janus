@@ -8,7 +8,7 @@ progressively builds mathematical abstractions using information-theoretic princ
 
 import numpy as np
 import sympy as sp
-from typing import Dict, List, Tuple, Optional, Set, Any
+from typing import Dict, List, Tuple, Optional, Set, Any, TypeVar, Generic, Union # Added TypeVar, Generic, Union
 from dataclasses import dataclass, field
 from collections import defaultdict
 import torch
