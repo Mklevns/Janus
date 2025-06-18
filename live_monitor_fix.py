@@ -152,6 +152,7 @@ class LiveMonitor:
         self.redis_pubsub: Optional[Any] = None
         self.redis_thread: Optional[threading.Thread] = None
         self._file_last_pos = 0
+        self._memory_last_index = 0
 
         if self.data_source_type == "redis":
             if not _REDIS_AVAILABLE:
@@ -230,19 +231,25 @@ class LiveMonitor:
             if TrainingLogger._instances:
                 logger_to_use = next(iter(TrainingLogger._instances), None)
 
-        if logger_to_use:
-            all_logs = logger_to_use.get_memory_logs()
-            if all_logs:
-                temp_data_store = {k:[] for k in self.data_history.keys()}
-                for log_entry in logger_to_use.memory_logs:
-                    temp_data_store['timestamps'].append(log_entry.get('timestamp', time.time()))
-                    for plot_key in self.plot_config.keys():
-                         if plot_key in log_entry:
-                            temp_data_store[plot_key].append(log_entry[plot_key])
+        if not logger_to_use:
+            return
 
-                for k, v_list in temp_data_store.items():
-                    self.data_history[k].clear()
-                    self.data_history[k].extend(v_list)
+        current_logs = logger_to_use.memory_logs
+        current_logs_len = len(current_logs)
+
+        if self._memory_last_index > current_logs_len:
+            self._memory_last_index = 0
+            for key in self.data_history.keys():
+                self.data_history[key].clear()
+
+        for i in range(self._memory_last_index, current_logs_len):
+            log_entry = current_logs[i]
+            self.data_history['timestamps'].append(log_entry.get('timestamp', time.time()))
+            for plot_key in self.plot_config.keys():
+                if plot_key in log_entry:
+                    self.data_history[plot_key].append(log_entry[plot_key])
+
+        self._memory_last_index = current_logs_len
 
     def _fetch_data_file(self):
         try:
