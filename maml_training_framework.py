@@ -26,7 +26,7 @@ import types # Ensure types is imported
 from symbolic_discovery_env import SymbolicDiscoveryEnv
 from hypothesis_policy_network import HypothesisNet, PPOTrainer
 from progressive_grammar_system import ProgressiveGrammar, Variable
-from math_utils import calculate_symbolic_accuracy
+from math_utils import calculate_symbolic_accuracy, safe_env_reset # Added import
 import sympy as sp
 
 # Try to import enhanced feedback if available
@@ -561,7 +561,7 @@ class MAMLTrainer:
         trajectories = []
         
         for episode in range(n_episodes):
-            obs, _ = env.reset()
+            obs, _ = safe_env_reset(env) # Use safe_env_reset
             trajectory = {
                 'observations': [],
                 'actions': [],

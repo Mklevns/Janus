@@ -8,9 +8,10 @@ with automatic optimization and adaptation.
 
 import numpy as np
 import torch
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Type
 from pathlib import Path
 import yaml
+from math_utils import validate_inputs, safe_import
 # from dataclasses import dataclass, field # No longer needed for JanusConfig
 import time
 from pydantic import BaseModel, Field, model_validator # BaseModel still needed for other configs
@@ -18,24 +19,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Dict, List, Optional, Any # Ensure Any is available
 from config_models import JanusConfig, SyntheticDataParamsConfig, RewardConfig, CurriculumStageConfig, RayConfig
 
-# Handle optional imports
-try:
-    import ray
-    HAS_RAY = True
-except ImportError:
-    HAS_RAY = False
+# Handle optional imports using safe_import
+ray = safe_import("ray", "ray")
+HAS_RAY = ray is not None
+if not HAS_RAY:
     print("⚠️  Ray not installed. Distributed features will be disabled.")
 
-try:
-    import wandb
-    HAS_WANDB = True
-except ImportError:
-    HAS_WANDB = False
+wandb = safe_import("wandb", "wandb")
+HAS_WANDB = wandb is not None
+if not HAS_WANDB:
     print("⚠️  W&B not installed. Experiment tracking will be disabled.")
 
 # Import all custom components
 from progressive_grammar_system import ProgressiveGrammar, Variable
-from symbolic_discovery_env import SymbolicDiscoveryEnv, CurriculumManager
+from symbolic_discovery_env import SymbolicDiscoveryEnv, CurriculumManager # Ensure SymbolicDiscoveryEnv is imported
 from enhanced_feedback import EnhancedSymbolicDiscoveryEnv, IntrinsicRewardCalculator, AdaptiveTrainingController
 from hypothesis_policy_network import HypothesisNet
 from physics_discovery_extensions import ConservationDetector, SymbolicRegressor
@@ -52,8 +49,9 @@ class AdvancedJanusTrainer:
     Master trainer that orchestrates all advanced training components.
     """
     
+    @validate_inputs
     def __init__(self, config: JanusConfig):
-        self.config = config
+        self.config: JanusConfig = config
         
         # Setup directories
         self._setup_directories()
@@ -103,12 +101,16 @@ class AdvancedJanusTrainer:
                 self.league_manager = None
         
         if self.config.training_mode in ["distributed", "advanced"]:
-            if HAS_RAY:
+            if HAS_RAY and ray: # Check both HAS_RAY and if ray module is not None
                 if not ray.is_initialized():
                     ray.init(num_cpus=self.config.num_workers * 2, 
                             num_gpus=self.config.num_gpus)
-            else:
-                print("⚠️  Ray not available. Distributed features disabled.")
+            elif not HAS_RAY: # Only print if HAS_RAY is False (already printed by safe_import)
+                # The initial print from safe_import already covers this.
+                # print("⚠️  Ray not available. Distributed features disabled.")
+                pass
+            else: # HAS_RAY is True but ray is None (should not happen with current safe_import)
+                 print("Unexpected: HAS_RAY is True but 'ray' module is None.")
                 if self.config.training_mode == "distributed":
                     print("❌ Cannot run in distributed mode without Ray")
                     raise RuntimeError("Ray required for distributed training")
@@ -124,15 +126,21 @@ class AdvancedJanusTrainer:
                 self.emergent_tracker = None
         
         # Initialize W&B
-        if self.config.wandb_project and HAS_WANDB:
+        if self.config.wandb_project and HAS_WANDB and wandb: # Check both HAS_WANDB and if wandb module is not None
             wandb.init(
                 project=self.config.wandb_project,
-                config=self.config.__dict__,
+                config=self.config.model_dump(), # Use model_dump() for Pydantic models
                 name=f"janus_{self.config.training_mode}_{int(time.time())}"
             )
         elif self.config.wandb_project and not HAS_WANDB:
-            print("⚠️  W&B tracking requested but wandb not installed")
+            # The initial print from safe_import already covers this.
+            # print("⚠️  W&B tracking requested but wandb not installed")
+            pass
+        elif self.config.wandb_project and HAS_WANDB and not wandb: # Should not happen
+            print("Unexpected: HAS_WANDB is True but 'wandb' module is None.")
+
     
+    @validate_inputs
     def prepare_data(self, 
                     data_path: Optional[str] = None,
                     generate_synthetic: bool = True) -> np.ndarray:
@@ -199,7 +207,8 @@ class AdvancedJanusTrainer:
         
         return data
     
-    def create_environment(self, data: np.ndarray) -> SymbolicDiscoveryEnv:
+    @validate_inputs
+    def create_environment(self, data: np.ndarray) -> SymbolicDiscoveryEnv: # Added SymbolicDiscoveryEnv hint
         """Create the discovery environment."""
         
         # Use reward config from JanusConfig if available
@@ -243,6 +252,8 @@ class AdvancedJanusTrainer:
         
         return env
     
+    # Not decorating create_trainer as it's more of an internal setup method
+    # and its validation depends heavily on prior state (self.env).
     def create_trainer(self):
         """Create the appropriate trainer based on mode."""
         
@@ -313,7 +324,7 @@ class AdvancedJanusTrainer:
                 trainer = PPOTrainer(policy, self.env)
             
             # Add distributed components if enough resources
-            if self.config.num_gpus > 1 and HAS_RAY:
+            if self.config.num_gpus > 1 and HAS_RAY and ray: # Check ray module
                 self._setup_distributed_components()
         
         else:
@@ -329,6 +340,7 @@ class AdvancedJanusTrainer:
         
         return trainer
     
+    # Internal helper, not decorating
     def _setup_distributed_components(self):
         """Setup distributed training components."""
         try:
@@ -359,6 +371,7 @@ class AdvancedJanusTrainer:
             self.evaluators = []
             self.experiment_workers = []
     
+    @validate_inputs
     def train(self):
         """Main training loop."""
         
@@ -535,14 +548,14 @@ class AdvancedJanusTrainer:
         torch.save({
             'policy_state_dict': self.trainer.policy.state_dict(),
             'grammar_state': self.grammar.export_grammar_state(),
-            'config': self.config.__dict__,
+            'config': self.config.model_dump(), # Use model_dump for Pydantic models
             'variables': [(v.name, v.index, v.properties) for v in self.variables]
         }, checkpoint_path)
         
         print(f"\nModel saved to {checkpoint_path}")
         
         # Close W&B
-        if self.config.wandb_project and HAS_WANDB:
+        if self.config.wandb_project and HAS_WANDB and wandb: # Check wandb module
             wandb.finish()
     
     def run_experiment_suite(self):
@@ -651,7 +664,7 @@ def main():
     print("\nTraining complete!")
     
     # Cleanup
-    if HAS_RAY and ray.is_initialized():
+    if HAS_RAY and ray and ray.is_initialized(): # Check ray module
         ray.shutdown()
 
 

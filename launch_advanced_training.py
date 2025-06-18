@@ -15,22 +15,23 @@ import subprocess
 import yaml
 import torch
 import psutil
-from typing import Dict, Any
+from typing import Dict, Any, Optional # Added Optional for save_checkpoint
+from math_utils import validate_inputs, safe_import
+from config_models import JanusConfig # For type hinting
 
-# Optional imports with fallbacks
-try:
-    import ray
-    HAS_RAY = True
-except ImportError:
-    HAS_RAY = False
-    print("⚠️  Ray not installed. Distributed training will be unavailable.")
+# Optional imports with fallbacks using safe_import
+ray = safe_import("ray", "ray")
+HAS_RAY = ray is not None
+# The warning for Ray is printed by safe_import if not found,
+# but we can add a specific message about disabled features.
+if not HAS_RAY:
+    print("⚠️  Ray features for distributed training will be unavailable.")
 
-try:
-    import GPUtil
-    HAS_GPUTIL = True
-except ImportError:
-    HAS_GPUTIL = False
-    print("⚠️  GPUtil not installed. GPU details will be limited.")
+GPUtil = safe_import("GPUtil", "GPUtil")
+HAS_GPUTIL = GPUtil is not None
+# Warning for GPUtil is printed by safe_import if not found.
+if not HAS_GPUTIL:
+    print("⚠️  GPUtil features for detailed GPU monitoring will be unavailable.")
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -52,7 +53,7 @@ def check_system_requirements() -> Dict[str, Any]:
     
     # Check GPU details
     if requirements['gpu_count'] > 0:
-        if HAS_GPUTIL:
+        if HAS_GPUTIL and GPUtil: # Check GPUtil module is not None
             gpus = GPUtil.getGPUs()
             requirements['gpu_details'] = [
                 {
@@ -80,6 +81,7 @@ def check_system_requirements() -> Dict[str, Any]:
     return requirements
 
 
+@validate_inputs
 def validate_config(config_path: str) -> Dict[str, Any]:
     """Validate and load configuration."""
     
@@ -115,6 +117,7 @@ def validate_config(config_path: str) -> Dict[str, Any]:
     return config
 
 
+@validate_inputs
 def setup_environment(config: Dict[str, Any]):
     """Setup directories and environment."""
     
@@ -134,7 +137,7 @@ def setup_environment(config: Dict[str, Any]):
     
     # Initialize Ray if needed
     if config['training_mode'] in ['distributed', 'advanced'] and config.get('num_workers', 0) > 1:
-        if not ray.is_initialized():
+        if HAS_RAY and ray and not ray.is_initialized(): # Check ray module
             ray_config = config.get('ray_config', {})
             
             # Extract only valid ray.init() parameters
@@ -161,10 +164,11 @@ def setup_environment(config: Dict[str, Any]):
                 print("  Continuing without Ray (will use single-machine training)")
 
 
+@validate_inputs
 def launch_training(config: Dict[str, Any], resume: bool = False): # config here is the dict from YAML
     """Launch the training process."""
     
-    from integrated_pipeline import AdvancedJanusTrainer, JanusConfig
+    from integrated_pipeline import AdvancedJanusTrainer # JanusConfig already imported at top
     
     print("\n" + "="*60)
     print("LAUNCHING JANUS ADVANCED TRAINING")
@@ -227,12 +231,13 @@ def launch_training(config: Dict[str, Any], resume: bool = False): # config here
         
     finally:
         # Cleanup
-        if HAS_RAY and ray.is_initialized():
+        if HAS_RAY and ray and ray.is_initialized(): # Check ray module
             ray.shutdown()
         print("\nCleanup completed")
 
 
-def save_checkpoint(trainer, janus_config: JanusConfig): # Changed signature to JanusConfig
+@validate_inputs
+def save_checkpoint(trainer: Any, janus_config: JanusConfig): # Type hint for trainer as Any
     """Save emergency checkpoint."""
     
     print("\nSaving emergency checkpoint...")
@@ -279,8 +284,8 @@ def save_checkpoint(trainer, janus_config: JanusConfig): # Changed signature to 
 def run_distributed_sweep(config_path: str, n_trials: int = 20):
     """Run distributed hyperparameter sweep."""
     
-    if not HAS_RAY:
-        print("❌ Ray is not installed. Cannot run distributed sweep.")
+    if not HAS_RAY or not ray: # Check ray module
+        print("❌ Ray is not installed or failed to import. Cannot run distributed sweep.")
         print("  Install with: pip install ray[tune]")
         sys.exit(1)
     

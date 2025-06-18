@@ -12,10 +12,16 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Deque, Any, Union
+from math_utils import safe_env_reset, safe_import
+from symbolic_discovery_env import SymbolicDiscoveryEnv # Ensure this is imported if needed, or adjust if not.
+from progressive_grammar_system import ProgressiveGrammar, Variable # Import from correct file
 from dataclasses import dataclass
 import torch.optim as optim
 from collections import deque
-import wandb
+
+# Use safe_import for wandb
+wandb = safe_import("wandb", "wandb")
+# HAS_WANDB = wandb is not None # Not strictly needed here as wandb is not directly used with guards
 
 
 class TreeLSTMCell(nn.Module):
@@ -342,7 +348,7 @@ class PPOTrainer:
 
     def collect_rollouts(self, n_steps: int, task_trajectories: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         self.rollout_buffer.reset()
-        obs, info = self.env.reset() # Standard reset signature
+        obs, info = safe_env_reset(self.env) # Use safe_env_reset
         # tree_structure may come from info if env provides it
         tree_structure = info.get('tree_structure') if isinstance(info, dict) else None
 
@@ -368,7 +374,7 @@ class PPOTrainer:
             if terminated or truncated:
                 ep_rew = info.get('episode_reward', reward) # Fallback to current reward if not in info
                 self.episode_rewards.append(ep_rew)
-                obs, info = self.env.reset()
+                obs, info = safe_env_reset(self.env) # Use safe_env_reset
                 tree_structure = info.get('tree_structure') if isinstance(info, dict) else None
 
 
@@ -484,7 +490,8 @@ class RolloutBuffer:
                 }
 
 if __name__ == "__main__":
-    from symbolic_discovery_env import SymbolicDiscoveryEnv, ProgressiveGrammar, Variable # Assuming these are importable
+    from symbolic_discovery_env import SymbolicDiscoveryEnv # Keep this
+    from progressive_grammar_system import ProgressiveGrammar, Variable # Import from correct file
     grammar = ProgressiveGrammar(); variables = [Variable("x",0,{}), Variable("v",1,{})]
     data = np.column_stack([np.random.randn(100), np.random.randn(100)*2, np.random.randn(100)])
     # Ensure SymbolicDiscoveryEnv can provide 'tree_structure' in info dict from reset/step if TreeEncoder is used.
@@ -495,8 +502,9 @@ if __name__ == "__main__":
     # Test Transformer
     policy_transformer = HypothesisNet(obs_dim, action_dim, grammar=grammar, use_meta_learning=True, encoder_type='transformer')
     print(f"Policy (Transformer, Meta) params: {sum(p.numel() for p in policy_transformer.parameters())}")
-    obs_info_tuple = env.reset() # Env might return (obs, info)
-    obs, info = obs_info_tuple if isinstance(obs_info_tuple, tuple) else (obs_info_tuple, {})
+    # obs_info_tuple = env.reset() # Env might return (obs, info)
+    # obs, info = obs_info_tuple if isinstance(obs_info_tuple, tuple) else (obs_info_tuple, {})
+    obs, info = safe_env_reset(env) # Use safe_env_reset here
 
     obs_tensor = torch.FloatTensor(np.array(obs)).unsqueeze(0)
     action_mask_np = env.get_action_mask()

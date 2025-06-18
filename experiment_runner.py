@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, List, Tuple, Optional, Any, Callable
 from dataclasses import dataclass, field, asdict
+from math_utils import validate_inputs, safe_import
 import json
 import pickle
 from pathlib import Path
@@ -20,9 +21,15 @@ from datetime import datetime
 import sympy as sp
 from scipy.integrate import odeint
 import torch
-import wandb
+# import wandb # Original direct import
 from tqdm import tqdm
 import hashlib
+# Use safe_import for wandb
+wandb = safe_import("wandb", "wandb")
+HAS_WANDB = wandb is not None
+# Optional: Add a print warning if HAS_WANDB is False, though safe_import handles the basic one.
+# if not HAS_WANDB:
+#     print("⚠️  W&B features will be unavailable in ExperimentRunner.")
 import abc
 import logging
 import importlib.metadata
@@ -260,13 +267,14 @@ class KeplerEnv(PhysicsEnvironment):
 
 
 class ExperimentRunner:
+    @validate_inputs
     def __init__(self,
                  base_dir: str = "./experiments",
                  use_wandb: bool = True,
                  strict_mode: bool = False): # Added strict_mode
-        self.base_dir = Path(base_dir); self.base_dir.mkdir(exist_ok=True)
-        self.use_wandb = use_wandb
-        self.strict_mode = strict_mode # Store strict_mode
+        self.base_dir: Path = Path(base_dir); self.base_dir.mkdir(exist_ok=True)
+        self.use_wandb: bool = use_wandb
+        self.strict_mode: bool = strict_mode # Store strict_mode
         self.env_registry = {'harmonic_oscillator': HarmonicOscillatorEnv, 'pendulum': PendulumEnv, 'kepler': KeplerEnv}
         self.algo_registry: Dict[str, Callable] = {}
         self._register_algorithms()
@@ -312,7 +320,7 @@ class ExperimentRunner:
             discovery_env = SymbolicDiscoveryEnv(grammar=grammar, target_data=env_data, variables=variables, **sde_params)
             policy_params = {'hidden_dim': janus_cfg.policy_hidden_dim, 'encoder_type': janus_cfg.policy_encoder_type, 'grammar': grammar}
             if exp_config.algo_params and 'policy_params' in exp_config.algo_params: policy_params.update(exp_config.algo_params['policy_params'])
-            policy = HypothesisNet(obs_dim=discovery_env.observation_space.shape[0], act_dim=discovery_env.action_space.n, **policy_params) # Renamed parameters
+            policy = HypothesisNet(observation_dim=discovery_env.observation_space.shape[0], action_dim=discovery_env.action_space.n, **policy_params) # Renamed parameters
             return PPOTrainer(policy, discovery_env)
         def create_genetic(env_data: np.ndarray, variables: List[Any], exp_config: ExperimentConfig) -> SymbolicRegressor:
             grammar = ProgressiveGrammar(); janus_cfg = exp_config.janus_config
@@ -326,6 +334,7 @@ class ExperimentRunner:
         self.algo_registry['genetic'] = create_genetic
         self.algo_registry['random'] = lambda _1, _2, _3: None # Ensure consistent signature
 
+    @validate_inputs
     def run_single_experiment(self, config: ExperimentConfig, run_id: int = 0) -> ExperimentResult:
         logging.info(f"Runner: Starting exp '{config.name}' (Run {run_id+1}/{config.n_runs}). Type: '{config.experiment_type}'")
         if not hasattr(config, 'experiment_type') or not config.experiment_type:
@@ -356,6 +365,7 @@ class ExperimentRunner:
     # _run_janus_experiment and _run_genetic_experiment are legacy helpers, assuming plugins handle their logic.
     # If they were still primary execution paths, they'd need similar JanusConfig integration.
 
+    @validate_inputs
     def run_experiment_suite(self, configs: List[ExperimentConfig], parallel: bool = False) -> pd.DataFrame:
         all_results: List[ExperimentResult] = []
         if parallel: logging.warning("Parallel execution not implemented. Running sequentially.")
@@ -494,10 +504,122 @@ if __name__ == "__main__":
 # as their parameterization is now handled via JanusConfig passed through ExperimentConfig.
 # The key changes are in ExperimentRunner and how ExperimentConfig is created and used.
 
+class PhysicsEnvironment(abc.ABC): # Added abc.ABC
+    @validate_inputs
+    def __init__(self, params: Dict[str, Any], noise_level: float = 0.0):
+        self.params = params
+        self.noise_level = noise_level
+        self.state_vars: List[str] = [] # Ensure type hint
+        self.ground_truth_laws: Dict[str, sp.Expr] = {} # Ensure type hint
+
+    @abc.abstractmethod # Added
+    def generate_trajectory(self, initial_conditions: np.ndarray, t_span: np.ndarray) -> np.ndarray:
+        raise NotImplementedError
+
+    def add_observation_noise(self, trajectory: np.ndarray) -> np.ndarray:
+        if self.noise_level > 0:
+            noise = np.random.randn(*trajectory.shape) * self.noise_level
+            signal_std = np.std(trajectory, axis=0)
+            # Add a small epsilon to signal_std to prevent division by zero or scaling by zero if std is 0
+            scaled_noise = noise * (signal_std + 1e-9)
+            return trajectory + scaled_noise
+        return trajectory
+
+    def get_ground_truth_laws(self) -> Dict[str, sp.Expr]:
+        return self.ground_truth_laws
+
+    # Added for PhysicsDiscoveryExperiment compatibility if needed
+    def get_ground_truth_conserved_quantities(self, trajectory_data: np.ndarray, variables: List[Any]) -> Dict[str, Any]:
+        # This is a placeholder. Each specific environment should implement this
+        # to return a dictionary of its ground truth conserved quantities
+        # based on the provided trajectory data.
+        # Example: {'conserved_energy': true_energy_values, 'conserved_momentum': true_momentum_values}
+        # where true_energy_values could be an array matching trajectory_data's length.
+        # For now, returning an empty dict or a structure indicating data not processed.
+        logging.warning(f"get_ground_truth_conserved_quantities not implemented for {type(self).__name__}. Returning raw data.")
+        # Fallback: Try to extract based on known law names if they match columns
+        processed_gt = {}
+        if self.ground_truth_laws:
+            for idx, var_info in enumerate(variables): # Assuming variables match columns
+                for law_name_key in self.ground_truth_laws.keys():
+                     # This is a heuristic and might not be correct.
+                     # Assumes a column in trajectory_data might directly represent a conserved quantity.
+                    if var_info.name == law_name_key or f"conserved_{var_info.name}" == law_name_key :
+                        if idx < trajectory_data.shape[1]:
+                             processed_gt[law_name_key] = trajectory_data[:, idx]
+        if not processed_gt: # If no direct match
+            processed_gt['raw_gt_data'] = trajectory_data # Or some other indicator
+        return processed_gt
+
+
+class HarmonicOscillatorEnv(PhysicsEnvironment):
+    @validate_inputs
+    def __init__(self, params: Dict[str, Any], noise_level: float = 0.0):
+        super().__init__(params, noise_level)
+        self.k = params.get('k', 1.0); self.m = params.get('m', 1.0)
+        self.state_vars = ['x', 'v']; x_sym, v_sym = sp.symbols('x v')
+        self.ground_truth_laws = {'energy_conservation': 0.5 * self.m * v_sym**2 + 0.5 * self.k * x_sym**2,
+                                  'equation_of_motion': -self.k * x_sym / self.m}
+    def dynamics(self, state: np.ndarray, t: float) -> np.ndarray:
+        x, v = state; return np.array([v, -self.k * x / self.m])
+    def generate_trajectory(self, initial_conditions: np.ndarray, t_span: np.ndarray) -> np.ndarray:
+        traj = odeint(self.dynamics, initial_conditions, t_span)
+        x, v = traj.T; energy = 0.5*self.m*v**2 + 0.5*self.k*x**2
+        return self.add_observation_noise(np.column_stack([x, v, energy]))
+
+class PendulumEnv(PhysicsEnvironment):
+    @validate_inputs
+    def __init__(self, params: Dict[str, Any], noise_level: float = 0.0):
+        super().__init__(params, noise_level)
+        self.g = params.get('g', 9.81); self.l = params.get('l', 1.0); self.m = params.get('m', 1.0)
+        self.small_angle = params.get('small_angle', False); self.state_vars = ['theta', 'omega']
+        theta_s, omega_s = sp.symbols('theta omega')
+        if self.small_angle:
+            self.ground_truth_laws = {'energy_conservation': 0.5*self.m*self.l**2*omega_s**2 + 0.5*self.m*self.g*self.l*theta_s**2,
+                                      'equation_of_motion': -self.g*theta_s/self.l}
+        else:
+            self.ground_truth_laws = {'energy_conservation': 0.5*self.m*self.l**2*omega_s**2 + self.m*self.g*self.l*(1-sp.cos(theta_s)),
+                                      'equation_of_motion': -self.g*sp.sin(theta_s)/self.l}
+    def dynamics(self, state: np.ndarray, t: float) -> np.ndarray:
+        theta, omega = state
+        domega_dt = -self.g*theta/self.l if self.small_angle else -self.g*np.sin(theta)/self.l
+        return np.array([omega, domega_dt])
+    def generate_trajectory(self, initial_conditions: np.ndarray, t_span: np.ndarray) -> np.ndarray:
+        traj = odeint(self.dynamics, initial_conditions, t_span)
+        theta, omega = traj.T
+        energy = (0.5*self.m*self.l**2*omega**2 + 0.5*self.m*self.g*self.l*theta**2) if self.small_angle \
+                 else (0.5*self.m*self.l**2*omega**2 + self.m*self.g*self.l*(1-np.cos(theta)))
+        return self.add_observation_noise(np.column_stack([theta, omega, energy]))
+
+class KeplerEnv(PhysicsEnvironment):
+    @validate_inputs
+    def __init__(self, params: Dict[str, Any], noise_level: float = 0.0):
+        super().__init__(params, noise_level)
+        self.G = params.get('G', 1.0); self.M = params.get('M', 1.0)
+        self.state_vars = ['r', 'theta', 'vr', 'vtheta']
+        r_s, _, vr_s, vtheta_s = sp.symbols('r theta vr vtheta') # theta_s unused in laws
+        self.ground_truth_laws = {'energy_conservation': 0.5*(vr_s**2 + (r_s*vtheta_s)**2) - self.G*self.M/r_s,
+                                  'angular_momentum': r_s**2 * vtheta_s,
+                                  'equation_of_motion_r': r_s*vtheta_s**2 - self.G*self.M/r_s**2}
+    def dynamics(self, state: np.ndarray, t: float) -> np.ndarray:
+        r, _, vr, vtheta = state # theta not used in dynamics eqns directly
+        dr_dt = vr; dtheta_dt = vtheta
+        dvr_dt = r*vtheta**2 - self.G*self.M/r**2
+        dvtheta_dt = -2*vr*vtheta/r if r > 1e-6 else 0 # Avoid division by zero if r is tiny
+        return np.array([dr_dt, dtheta_dt, dvr_dt, dvtheta_dt])
+    def generate_trajectory(self, initial_conditions: np.ndarray, t_span: np.ndarray) -> np.ndarray:
+        traj = odeint(self.dynamics, initial_conditions, t_span)
+        r, theta, vr, vtheta = traj.T
+        energy = 0.5*(vr**2 + (r*vtheta)**2) - self.G*self.M/r
+        angular_momentum = r**2 * vtheta
+        return self.add_observation_noise(np.column_stack([r, theta, vr, vtheta, energy, angular_momentum]))
+
+
 class PhysicsDiscoveryExperiment(BaseExperiment):
+    @validate_inputs
     def __init__(self, config: ExperimentConfig, algo_registry: Dict[str, Callable], env_registry: Dict[str, Callable]):
         super().__init__()
-        self.config = config
+        self.config: ExperimentConfig = config
         self.janus_config = config.janus_config
         self.algo_registry = algo_registry
         self.env_registry = env_registry
@@ -542,13 +664,13 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
         self._start_time: float = 0.0
 
         if _EMERGENT_MONITOR_AVAILABLE:
-            self.emergent_tracker = EmergentBehaviorTracker(save_dir=str(self.tracker_save_dir / "emergent_analysis"))
+            self.emergent_tracker: EmergentBehaviorTracker = EmergentBehaviorTracker(save_dir=str(self.tracker_save_dir / "emergent_analysis"))
         else:
             # Use the dummy version if the real one couldn't be imported
-            self.emergent_tracker = EmergentBehaviorTracker(save_dir=str(self.tracker_save_dir / "emergent_analysis"))
-        self._last_logged_phase_idx_to_monitor = 0
+            self.emergent_tracker: EmergentBehaviorTracker = EmergentBehaviorTracker(save_dir=str(self.tracker_save_dir / "emergent_analysis"))
+        self._last_logged_phase_idx_to_monitor: int = 0
 
-    def _flush_new_phase_transitions_to_live_monitor(self):
+    def _flush_new_phase_transitions_to_live_monitor(self): # Not decorated as it's internal
         if not hasattr(self, 'emergent_tracker') or not _EMERGENT_MONITOR_AVAILABLE:
             return
         if not hasattr(self, 'live_monitor') or not self.live_monitor:
@@ -827,6 +949,29 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
             logging.info(f"[{self.config.name}] EXECUTE: Run complete. Law: '{self.experiment_result.discovered_law}'")
         except Exception as e:
             logging.error(f"[{self.config.name}] EXECUTE: Exception (run {run_id}): {e}", exc_info=True)
+    @validate_inputs
+    def execute(self, run_id: int = 0) -> ExperimentResult:
+        self._start_time = time.time()
+        self.experiment_result = ExperimentResult(config=self.config, run_id=run_id)
+        try:
+            logging.info(f"[{self.config.name}] EXECUTE: Setup (run {run_id})...")
+            self.setup() # Not decorated itself, called by execute
+            if self.env_data is not None: self.experiment_result.trajectory_data = self.env_data
+            logging.info(f"[{self.config.name}] EXECUTE: Run (run {run_id})...")
+            run_specific_result = self.run(run_id=run_id) # run is not decorated here, but called by execute
+            if run_specific_result: # Merge results
+                self.experiment_result.discovered_law = run_specific_result.discovered_law
+                self.experiment_result.symbolic_accuracy = run_specific_result.symbolic_accuracy
+                self.experiment_result.predictive_mse = run_specific_result.predictive_mse
+                self.experiment_result.law_complexity = run_specific_result.law_complexity
+                self.experiment_result.n_experiments_to_convergence = run_specific_result.n_experiments_to_convergence
+                self.experiment_result.sample_efficiency_curve = run_specific_result.sample_efficiency_curve
+                self.experiment_result.component_metrics = run_specific_result.component_metrics
+                if run_specific_result.trajectory_data is not None: self.experiment_result.trajectory_data = run_specific_result.trajectory_data
+            else: self.experiment_result.discovered_law = "Error: run() returned None"
+            logging.info(f"[{self.config.name}] EXECUTE: Run complete. Law: '{self.experiment_result.discovered_law}'")
+        except Exception as e:
+            logging.error(f"[{self.config.name}] EXECUTE: Exception (run {run_id}): {e}", exc_info=True)
             if self.experiment_result: self.experiment_result.discovered_law = f"Critical Error: {str(e)[:150]}"
             if self.config.janus_config.strict_mode: # Check strict_mode from JanusConfig
                 logging.critical(f"Strict mode: Exiting due to critical error during execute: {e}")
@@ -835,11 +980,11 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
         finally:
             if self.experiment_result: self.experiment_result.wall_time_seconds = time.time() - self._start_time
             logging.info(f"[{self.config.name}] EXECUTE: Teardown (run {run_id})...")
-            self.cleanup(); self.teardown()
+            self.cleanup(); self.teardown() # Ensure these methods exist and are properly defined
             logging.info(f"[{self.config.name}] EXECUTE: Teardown complete (run {run_id}).")
         return self.experiment_result if self.experiment_result else ExperimentResult(config=self.config, run_id=run_id, discovered_law="Critical error: result not formed.")
 
-    def get_best_discovered_law(self) -> Optional[Dict[str, Any]]:
+    def get_best_discovered_law(self) -> Optional[Dict[str, Any]]: # Not decorated as per plan
         if not self.training_integration: return None
         return self.training_integration.get_best_discovered_law(criterion='overall')
 
