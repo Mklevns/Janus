@@ -325,6 +325,11 @@ class HypothesisNet(nn.Module):
 
         batch_size, obs_dim = observation.shape
         # Dynamically infer how many nodes are present
+        if obs_dim % self.node_feature_dim != 0:
+            raise ValueError(
+                f"Observation dimension ({obs_dim}) is not a multiple of "
+                f"node_feature_dim ({self.node_feature_dim})."
+            )
         num_nodes = obs_dim // self.node_feature_dim
         if self.debug:
             print(f"[DEBUG] computed num_nodes={num_nodes}, node_feature_dim={self.node_feature_dim}, obs_size={obs_dim}")
