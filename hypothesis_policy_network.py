@@ -420,7 +420,8 @@ class PPOTrainer:
         clip_range: float = 0.2, # Renamed from clip_epsilon to clip_range
         value_coef: float = 0.5,
         entropy_coef: float = 0.01,
-        max_grad_norm: float = 0.5
+        max_grad_norm: float = 0.5,
+        checkpoint_dir: Optional[str] = None
     ) -> None:
         self.policy = policy
         self.env = env # Make sure env has get_action_mask and other required methods.
@@ -435,6 +436,11 @@ class PPOTrainer:
         self.rollout_buffer = RolloutBuffer()
         self.episode_rewards: Deque[float] = deque(maxlen=100)
         # Removed episode_complexities and episode_mse as they were not consistently updated/used.
+
+        self.checkpoint_manager = None
+        if checkpoint_dir:
+            from checkpoint_manager import CheckpointManager # noqa: E402
+            self.checkpoint_manager = CheckpointManager(checkpoint_dir)
 
     def collect_rollouts(self, n_steps: int, task_trajectories: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         self.rollout_buffer.reset()
@@ -507,6 +513,16 @@ class PPOTrainer:
               # task_trajectories_for_batch: Optional[torch.Tensor] = None # If fixed for all batches
              ):
         n_updates = total_timesteps // rollout_length
+        current_timesteps = 0 # Keep track of total timesteps for checkpointing
+
+        # Try to load from checkpoint if manager is available
+        if self.checkpoint_manager:
+            loaded_timesteps = self.load_from_checkpoint() # Assuming load_from_checkpoint is defined
+            if loaded_timesteps > 0:
+                current_timesteps = loaded_timesteps
+                print(f"Resumed training from timestep {current_timesteps}")
+
+
         for update in range(1, n_updates + 1):
             # In a real meta-PPO, task_trajectories might change per update or be sampled with rollouts
             rollout_data = self.collect_rollouts(rollout_length, task_trajectories=None) # Pass None for now
@@ -550,13 +566,82 @@ class PPOTrainer:
 
                     if batch and 'observations' in batch and len(batch['observations']) > 0: # Ensure essential keys are present and batch is not empty
                         # If RolloutBuffer stored task_trajs, extract batch['task_trajectories_batch'] here
-                        self.train_step(batch, task_trajectories_batch=None) # Pass None for now
+                        metrics = self.train_step(batch, task_trajectories_batch=None) # Pass None for now
+                        # Store loss for potential checkpointing, could average over epoch
+                        # For simplicity, using the last batch's loss for checkpoint metrics for now
+                        last_loss = metrics.get('loss', 0)
                     elif 'observations' not in batch or len(batch['observations']) == 0 :
                         print(f"Skipping train_step due to empty or invalid batch for update {update}, epoch {epoch_num}, start_idx {start_idx}")
 
+            current_timesteps += num_samples_in_rollout
+
             if update % log_interval == 0:
                 avg_reward = np.mean(list(self.episode_rewards)) if self.episode_rewards else float('nan')
-                print(f"Update {update}/{n_updates}, Avg Reward: {avg_reward:.3f}")
+                print(f"Update {update}/{n_updates}, Timesteps: {current_timesteps}/{total_timesteps}, Avg Reward: {avg_reward:.3f}")
+
+            # Add periodic checkpointing
+            if self.checkpoint_manager and current_timesteps > 0 and (update % (10000 // rollout_length) == 0 or update == n_updates): # Checkpoint based on updates or at the end
+                # A more accurate timesteps for checkpoint would be `current_timesteps`
+                # Ensure env_state can be fetched; might need a get_state method in SymbolicDiscoveryEnv
+                env_state = self.env.get_state() if hasattr(self.env, 'get_state') else None
+
+                state_to_save = {
+                    'policy_state_dict': self.policy.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'timesteps': current_timesteps,
+                    'env_state': env_state,
+                    'episode_rewards_deque': list(self.episode_rewards) # Save the deque as a list
+                }
+                # Use last_loss from training step, and current avg_reward
+                metrics_to_save = {
+                    'mean_reward': np.mean(list(self.episode_rewards)) if self.episode_rewards else 0,
+                    'loss': last_loss if 'last_loss' in locals() else 0 # Ensure last_loss is defined
+                }
+                self.checkpoint_manager.save_checkpoint(state_to_save, current_timesteps, metrics_to_save)
+                print(f"Saved checkpoint at timestep {current_timesteps}")
+
+    def load_from_checkpoint(self, checkpoint_path: Optional[str] = None) -> int:
+        """Load trainer state from checkpoint."""
+        if not self.checkpoint_manager:
+            # It's not an error to not have a checkpoint manager; just means no checkpointing.
+            # However, if this method is called, it implies an expectation of loading.
+            # Depending on strictness, could print a warning or raise error.
+            # For now, let's assume if called, manager should ideally be there.
+            # If called during __init__, it should not raise error if checkpoint_dir was None.
+            # Let's make it explicit: if called and no manager, it's a problem for loading.
+            print("Warning: Checkpoint manager not configured. Cannot load checkpoint.")
+            return 0
+
+        if checkpoint_path:
+            checkpoint = self.checkpoint_manager.load_checkpoint(checkpoint_path)
+        else:
+            checkpoint = self.checkpoint_manager.load_latest_checkpoint()
+
+        if checkpoint:
+            try:
+                self.policy.load_state_dict(checkpoint['state']['policy_state_dict'])
+                self.optimizer.load_state_dict(checkpoint['state']['optimizer_state_dict'])
+
+                # Restore episode_rewards deque if available
+                if 'episode_rewards_deque' in checkpoint['state']:
+                    self.episode_rewards = deque(checkpoint['state']['episode_rewards_deque'], maxlen=self.episode_rewards.maxlen)
+
+                # Restore environment state if available and method exists
+                if 'env_state' in checkpoint['state'] and checkpoint['state']['env_state'] is not None:
+                    if hasattr(self.env, 'set_state'):
+                        self.env.set_state(checkpoint['state']['env_state'])
+                    else:
+                        print("Warning: Environment has no set_state method. Cannot restore env_state from checkpoint.")
+
+                print(f"Successfully loaded checkpoint from step {checkpoint.get('timestep', 0)}")
+                return checkpoint['state'].get('timesteps', 0)
+            except Exception as e:
+                print(f"Error loading state from checkpoint: {e}. Starting from scratch.")
+                return 0
+        else:
+            print("No checkpoint found to load.")
+        return 0
+
 
 class RolloutBuffer:
     def __init__(self): self.reset()
