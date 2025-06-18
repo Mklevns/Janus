@@ -195,10 +195,15 @@ def add_intrinsic_rewards_to_env(env: SymbolicDiscoveryEnv,
         obs, reward, terminated, truncated, info = self._original_step(action)
         
         if terminated and 'expression' in info:
+            # Calculate intrinsic reward
             enhanced_reward = self._intrinsic_calculator.calculate_intrinsic_reward(
                 expression=info['expression'],
                 complexity=info.get('complexity', 0),
-                extrinsic_reward=reward
+                extrinsic_reward=reward,
+                # FIX: Add the missing arguments
+                embedding=None,  # Pass None as a placeholder for the embedding
+                data=self.target_data,
+                variables=self.variables
             )
             
             info['intrinsic_bonus'] = enhanced_reward - reward
