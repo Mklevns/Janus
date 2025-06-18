@@ -6,6 +6,7 @@ Implements tighter integration between components for more effective discovery.
 """
 
 import numpy as np
+import sympy
 import torch
 import torch.nn as nn
 from typing import Dict, List, Tuple, Optional, Any, Deque
@@ -15,7 +16,7 @@ import time
 
 from symbolic_discovery_env import SymbolicDiscoveryEnv, ExpressionNode
 from hypothesis_policy_network import HypothesisNet, PPOTrainer
-from progressive_grammar_system import Expression
+from progressive_grammar_system import Expression, Variable # Added Variable
 from conservation_reward_fix import ConservationBiasedReward as NewConservationBiasedReward
 
 
@@ -82,33 +83,68 @@ class IntrinsicRewardCalculator:
         complexity_reward = self._calculate_complexity_growth_reward(complexity)
 
         # 4. Conservation Bonus
-        # Placeholder adaptation for the new ConservationBiasedReward signature
-        mock_predicted_traj = {
-            'expression_string': expression,
-            # Potentially, some evaluation of 'expression' using 'variables' if feasible here
-            # For now, keeping it simple. Actual evaluation might be part of NewConservationBiasedReward
-            # or happen before this call in a more integrated setup.
-        }
-        mock_ground_truth_traj = {
-            # Assuming 'data' contains relevant ground truth physical quantities.
-            # The new reward class expects specific keys like 'conserved_energy', 'conserved_momentum'.
-            # This mapping needs to be established. For now, pass 'data' as a generic placeholder.
-            'raw_data': data, # This 'data' is likely a numpy array from the environment.
-                               # It needs to be processed into the expected dictionary format.
-                               # For example, if data columns are [x, v, energy_gt], then
-                               # mock_ground_truth_traj = {'conserved_energy': data[:, 2]}
-                               # This specific adaptation is beyond this step, requires knowledge of 'data' structure.
-        }
-        mock_hypothesis_params = {
-            'variables_info': variables
-            # 'variables' is a list of Variable objects.
-            # NewConservationBiasedReward might expect parameter values like {'mass': 1.0}
-        }
+        evaluated_values = self.evaluate_expression_on_data(expression, data, variables)
+
+        predicted_traj = {}
+        if evaluated_values is not None and not np.all(np.isnan(evaluated_values)): # Check if evaluation was successful and not all NaN
+            for c_type in self.conservation_calculator.conservation_types:
+                predicted_traj[f'conserved_{c_type}'] = evaluated_values
+        else: # if evaluate_expression_on_data returned None or all NaNs (e.g. parse error or universal eval error)
+            # Populate with None to ensure compute_conservation_bonus handles it gracefully
+            for c_type in self.conservation_calculator.conservation_types:
+                predicted_traj[f'conserved_{c_type}'] = None
+
+        ground_truth_traj = {}
+        for c_type in self.conservation_calculator.conservation_types:
+            gt_column_index = None
+            # Attempt 1: Exact match or common variations
+            potential_names = [
+                c_type.lower(),
+                f"gt_{c_type.lower()}",
+                f"{c_type.lower()}_gt",
+                f"true_{c_type.lower()}",
+                c_type.upper(),
+                c_type # Original case
+            ]
+            if c_type.lower() == 'energy':
+                potential_names.extend(['e', 'e_total', 'hamiltonian'])
+            elif c_type.lower() == 'momentum':
+                potential_names.extend(['p', 'mom'])
+            elif c_type.lower() == 'mass':
+                 potential_names.extend(['m'])
+
+            found_match = False
+            for var_obj in variables: # variables is List[Variable]
+                var_name_lower = var_obj.name.lower()
+                for p_name in potential_names:
+                    if p_name == var_name_lower: # Exact match (case insensitive for p_name vs var_name_lower)
+                        gt_column_index = var_obj.index
+                        found_match = True
+                        break
+                if found_match:
+                    break
+
+            # Attempt 2: Substring match if no specific match found
+            if not found_match:
+                for var_obj in variables:
+                    if c_type.lower() in var_obj.name.lower():
+                        gt_column_index = var_obj.index
+                        found_match = True
+                        break
+
+            if found_match and gt_column_index is not None and gt_column_index < data.shape[1]:
+                ground_truth_traj[f'conserved_{c_type}'] = data[:, gt_column_index]
+            else:
+                ground_truth_traj[f'conserved_{c_type}'] = None
+                # Optionally print a warning:
+                # print(f"Warning: No ground truth column found for {c_type} or index {gt_column_index} out of bounds for data shape {data.shape}")
+
+        hypothesis_params = {'variables_info': variables}
 
         conservation_bonus = self.conservation_calculator.compute_conservation_bonus(
-            predicted_traj=mock_predicted_traj,
-            ground_truth_traj=mock_ground_truth_traj, # This will need careful data mapping
-            hypothesis_params=mock_hypothesis_params # This also needs mapping
+            predicted_traj=predicted_traj,
+            ground_truth_traj=ground_truth_traj,
+            hypothesis_params=hypothesis_params
         )
         
         # Combine rewards
@@ -127,7 +163,68 @@ class IntrinsicRewardCalculator:
         
         # Return combined reward
         return extrinsic_reward + intrinsic_reward
-    
+
+    def evaluate_expression_on_data(self, expression_str: str, data: np.ndarray, variables: List[Variable]) -> np.ndarray:
+        """
+        Evaluates a symbolic expression string on given data.
+
+        Args:
+            expression_str: The string representation of the mathematical expression.
+            data: A NumPy array where rows are data points and columns correspond to variables.
+            variables: A list of Variable objects, defining the symbols and their data indices.
+
+        Returns:
+            A 1D NumPy array with the evaluated results. NaN for errors.
+        """
+        try:
+            sympy_expr = sympy.parse_expr(expression_str)
+        except Exception as e:
+            print(f"Error parsing expression '{expression_str}': {e}")
+            return np.full(data.shape[0], np.nan)
+
+        # Create a list of SymPy symbols from the Variable objects
+        # These are the symbols that SymPy will recognize in the expression
+        sympy_symbols = [var.symbolic for var in variables]
+
+        evaluated_results = []
+        for i in range(data.shape[0]):
+            row_data = data[i, :]
+            substitution_dict = {}
+            for var_obj in variables:
+                # var_obj.index gives the column in data for this variable
+                # var_obj.symbolic is the SymPy symbol for this variable
+                substitution_dict[var_obj.symbolic] = row_data[var_obj.index]
+
+            try:
+                # Substitute values and evaluate
+                evaluated_value = sympy_expr.subs(substitution_dict).evalf()
+
+                # Check if the result is a number (SymPy can return symbolic results)
+                if isinstance(evaluated_value, (sympy.Number, float, int)):
+                    evaluated_results.append(float(evaluated_value))
+                elif evaluated_value == sympy.zoo or evaluated_value == sympy.oo or evaluated_value == -sympy.oo: # Check for infinity
+                    print(f"Warning: Expression '{expression_str}' evaluated to infinity for data row {i}.")
+                    evaluated_results.append(np.nan)
+                elif hasattr(evaluated_value, 'is_Symbol') and evaluated_value.is_Symbol: # e.g. if a symbol remains
+                    print(f"Warning: Expression '{expression_str}' resulted in a symbolic expression for data row {i}: {evaluated_value}")
+                    evaluated_results.append(np.nan)
+                else: # Catch other non-numeric results
+                    print(f"Warning: Expression '{expression_str}' evaluated to non-numeric type '{type(evaluated_value)}' for data row {i}: {evaluated_value}")
+                    evaluated_results.append(np.nan)
+            except (TypeError, AttributeError, sympy.SympifyError, ValueError, ZeroDivisionError) as e:
+                # TypeError can occur for undefined functions (e.g., log(-1))
+                # AttributeError can occur for various reasons with SymPy objects
+                # SympifyError for issues during internal conversion/evaluation
+                # ValueError for math domain errors not caught by SymPy directly
+                # ZeroDivisionError for explicit division by zero if not handled by SymPy's 1/0 -> zoo
+                print(f"Error evaluating expression '{expression_str}' with data row {i} (substitutions: {substitution_dict}): {e}")
+                evaluated_results.append(np.nan)
+            except Exception as e: # Catch any other unexpected errors
+                print(f"Unexpected error evaluating expression '{expression_str}' with data row {i}: {e}")
+                evaluated_results.append(np.nan)
+
+        return np.array(evaluated_results, dtype=float)
+
     def _calculate_novelty_reward(self, expression: str) -> float:
         """Reward for discovering new expressions."""
         
