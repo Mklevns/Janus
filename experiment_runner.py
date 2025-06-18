@@ -37,7 +37,7 @@ from symmetry_detection_fix import PhysicsSymmetryDetector
 from live_monitor import TrainingLogger, LiveMonitor
 from sympy import lambdify, symbols
 from progressive_grammar_system import Expression as SymbolicExpression
-from integrated_pipeline import JanusConfig, SyntheticDataParamsConfig
+from config_models import JanusConfig, SyntheticDataParamsConfig
 from pydantic import BaseModel
 
 
