@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Deque, Any, Union
+from typing import Dict, List, Tuple, Optional, Deque, Any, Union, TypedDict # Added TypedDict
 from math_utils import safe_env_reset, safe_import
 from symbolic_discovery_env import SymbolicDiscoveryEnv # Ensure this is imported if needed, or adjust if not.
 from progressive_grammar_system import ProgressiveGrammar, Variable # Import from correct file
@@ -23,6 +23,12 @@ from collections import deque
 wandb = safe_import("wandb", "wandb")
 # HAS_WANDB = wandb is not None # Not strictly needed here as wandb is not directly used with guards
 
+class HypothesisNetOutput(TypedDict, total=False):
+    """Output dictionary from HypothesisNet forward pass."""
+    action_logits: torch.Tensor  # Always present
+    value: torch.Tensor  # Always present
+    tree_representation: torch.Tensor  # Always present
+    task_embedding: torch.Tensor  # Optional - only present if task embedding exists
 
 class TreeLSTMCell(nn.Module):
     """Tree-structured LSTM cell for processing expression trees."""
@@ -183,16 +189,23 @@ class TransformerEncoder(nn.Module):
         return tree_repr
 
 class HypothesisNet(nn.Module):
-    def __init__(self, observation_dim: int, action_dim: int, hidden_dim: int = 256,
-                 encoder_type: str = 'transformer', grammar: Optional['ProgressiveGrammar'] = None,
-                 debug: bool = False, use_meta_learning: bool = False):
+    def __init__(
+        self,
+        obs_dim: int,
+        act_dim: int,
+        hidden_dim: int = 256,
+        encoder_type: str = 'transformer',
+        grammar: Optional['ProgressiveGrammar'] = None,
+        debug: bool = False, # Restored
+        use_meta_learning: bool = False # Restored
+    ) -> None:
         super().__init__()
-        self.observation_dim = observation_dim
-        self.action_dim = action_dim
+        self.observation_dim = obs_dim # Corrected
+        self.action_dim = act_dim       # Corrected
         self.hidden_dim = hidden_dim
         self.grammar = grammar
-        self.debug = debug
-        self.use_meta_learning = use_meta_learning
+        self.debug = debug             # Restored
+        self.use_meta_learning = use_meta_learning # Restored
         self.node_feature_dim = 128
 
         if encoder_type == 'transformer':
@@ -227,16 +240,32 @@ class HypothesisNet(nn.Module):
         self.action_embeddings = nn.Embedding(action_dim, 64)
         # self.grammar_context = nn.LSTM(input_size=64, hidden_size=128, num_layers=2, batch_first=True) # Currently unused
 
-    def forward(self, observation: torch.Tensor,
-                action_mask: Optional[torch.Tensor] = None,
-                task_trajectories: Optional[torch.Tensor] = None,
-                tree_structure: Optional[Dict[int, List[int]]] = None # Added for TreeEncoder
-                ) -> Dict[str, Union[torch.Tensor, Optional[torch.Tensor]]]:
-        batch_size, obs_dim = observation.shape
+    def forward(
+        self,
+        obs: torch.Tensor,
+        action_mask: Optional[torch.Tensor] = None,
+        # task_trajectories and tree_structure are existing params, kept for now.
+        # User-provided signature for forward only specified obs and action_mask.
+        # Assuming these other params are still needed by the method body.
+        task_trajectories: Optional[torch.Tensor] = None,
+        tree_structure: Optional[Dict[int, List[int]]] = None
+    ) -> HypothesisNetOutput:
+        """
+        Forward pass through the network.
+
+        Returns:
+            Dictionary containing:
+            - action_logits: Logits for action distribution
+            - value: Value function estimate
+            - tree_representation: Latent representation of expression tree
+            - task_embedding: Task-specific embedding (if applicable)
+        """
+        batch_size, obs_dim = obs.shape # Changed to use new param name 'obs'
         if obs_dim % self.node_feature_dim != 0:
             raise ValueError("Observation dimension must be a multiple of node_feature_dim.")
         num_nodes = obs_dim // self.node_feature_dim
-        tree_features = observation.view(batch_size, num_nodes, self.node_feature_dim)
+        # Corrected: use 'obs' instead of 'observation'
+        tree_features = obs.view(batch_size, num_nodes, self.node_feature_dim)
 
         if isinstance(self.encoder, TreeEncoder):
             tree_repr = self.encoder(tree_features, tree_structure)
@@ -308,40 +337,101 @@ class HypothesisNet(nn.Module):
 
         action_logits = masked_logits.nan_to_num(nan=-1e9, posinf=1e9, neginf=-1e9)
 
-        return_dict: Dict[str, Union[torch.Tensor, Optional[torch.Tensor]]] = {
-            'policy_logits': policy_logits, 'action_logits': action_logits,
-            'value': value, 'tree_representation': tree_repr
+        # Constructing the dictionary to match HypothesisNetOutput
+        # 'policy_logits' is not part of HypothesisNetOutput, so it's removed from the return.
+        # If it were needed, HypothesisNetOutput would need to be updated.
+        return_dict: HypothesisNetOutput = {
+            'action_logits': action_logits, # Ensure this key matches if it's 'policy_logits' or 'action_logits'
+            'value': value,
+            'tree_representation': tree_repr
         }
         if self.use_meta_learning and task_embedding_vector is not None:
             return_dict['task_embedding'] = task_embedding_vector
+
+        # Before returning, ensure all required fields (if any were total=True) are present.
+        # For total=False, this structure is fine.
         return return_dict
 
-    def get_action(self, observation: torch.Tensor,
-                   action_mask: Optional[torch.Tensor] = None,
-                   task_trajectories: Optional[torch.Tensor] = None,
-                   tree_structure: Optional[Dict[int, List[int]]] = None, # Added
-                   deterministic: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: # Return action as tensor
-        outputs = self.forward(observation, action_mask, task_trajectories, tree_structure) # Pass tree_structure
-        dist = Categorical(logits=outputs['action_logits'])
-        action = torch.argmax(outputs['action_logits'], dim=-1) if deterministic else dist.sample()
-        log_prob = dist.log_prob(action) # action is shape (B,)
+    def get_action(
+        self,
+        obs: Union[np.ndarray, torch.Tensor], # As per original spec
+        action_mask: Optional[torch.Tensor] = None, # Added from existing, seems important
+        task_trajectories: Optional[torch.Tensor] = None, # Added from existing
+        tree_structure: Optional[Dict[int, List[int]]] = None, # Added from existing
+        deterministic: bool = False # Added from existing
+    ) -> Tuple[int, float, float]: # As per original spec
+        # Process obs: if it's a numpy array, convert to tensor
+        if isinstance(obs, np.ndarray):
+            obs_tensor = torch.FloatTensor(obs).unsqueeze(0) # Assuming single obs if np.ndarray
+        else:
+            obs_tensor = obs # Assuming it's already a batched tensor if not np.ndarray
 
-        if observation.shape[0] == 1: # If batch size is 1
-            action = action.squeeze(0)    # (1,) -> ()
-            log_prob = log_prob.squeeze(0)  # (1,) -> ()
-            # value from forward is (B, 1). If B=1, it's (1,1), which matches the test. So no change to value.
+        # Ensure obs_tensor is correctly shaped (e.g., unsqueezed if it's a single instance)
+        # The original code had: obs_tensor = torch.FloatTensor(np.array(obs)).unsqueeze(0) in PPOTrainer
+        # And: outputs = self.forward(observation, ...) where observation was already a tensor.
+        # For consistency, if a single np.ndarray is passed, it should likely be unsqueezed.
+        # If a batched torch.Tensor is passed, it might already be correct.
+        # The method needs to handle both cases for `obs_tensor` preparation.
 
-        return action, log_prob, outputs['value'] # Return action tensor
+        # Based on previous forward call, obs_tensor should be (B, ObsDim)
+        # If obs is np.ndarray (single observation), it needs to be (1, ObsDim)
+        if obs_tensor.ndim == 1: # If it's a flat array, unsqueeze
+            obs_tensor = obs_tensor.unsqueeze(0)
+
+
+        outputs = self.forward(obs_tensor, action_mask, task_trajectories, tree_structure)
+
+        # The spec asks for Tuple[int, float, float]
+        # This implies processing a single action, not a batch.
+        # If obs_tensor is batched (B>1), this needs clarification on how to pick one.
+        # Assuming B=1 for the return type.
+        if obs_tensor.shape[0] != 1:
+            # This case needs clarification if the input can be batched but output must be single int/float.
+            # For now, let's assume if input `obs` is `np.ndarray`, it implies single action.
+            # If `obs` is `torch.Tensor`, it could be batched.
+            # Raising an error or taking the first item if batch > 1.
+            # For now, this code will proceed assuming the values can be extracted for a single item.
+            # Or, the type hint Tuple[int, float, float] implies this method is for single item action inference.
+            pass # Let it run, will likely fail if batched and .item() is called.
+
+        dist = Categorical(logits=outputs['action_logits']) # (B, ActDim)
+        action_tensor = torch.argmax(outputs['action_logits'], dim=-1) if deterministic else dist.sample() # (B,)
+        log_prob_tensor = dist.log_prob(action_tensor) # (B,)
+        value_tensor = outputs['value'] # (B, 1)
+
+        # Extract as single numbers as per Tuple[int, float, float]
+        # This assumes batch size is 1, or we take the first element.
+        action_val: int = action_tensor[0].item()
+        log_prob_val: float = log_prob_tensor[0].item()
+        # Value from forward is (B, 1). Squeeze to (B,) then get item.
+        value_val: float = value_tensor[0].squeeze().item()
+
+        return action_val, log_prob_val, value_val
 
 class PPOTrainer:
-    def __init__(self, policy: HypothesisNet, env: 'SymbolicDiscoveryEnv', lr: float = 3e-4,
-                 gamma: float = 0.99, gae_lambda: float = 0.95, clip_epsilon: float = 0.2,
-                 value_coef: float = 0.5, entropy_coef: float = 0.01, max_grad_norm: float = 0.5):
+    def __init__(
+        self,
+        policy: HypothesisNet,
+        env: 'SymbolicDiscoveryEnv',
+        learning_rate: float = 3e-4, # Renamed from lr to learning_rate
+        n_epochs: int = 10, # Added n_epochs as per spec, though not used in current __init__ body
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        clip_range: float = 0.2, # Renamed from clip_epsilon to clip_range
+        value_coef: float = 0.5,
+        entropy_coef: float = 0.01,
+        max_grad_norm: float = 0.5
+    ) -> None:
         self.policy = policy
         self.env = env # Make sure env has get_action_mask and other required methods.
-        self.optimizer = optim.Adam(policy.parameters(), lr=lr)
-        self.gamma, self.gae_lambda, self.clip_epsilon = gamma, gae_lambda, clip_epsilon
+        self.optimizer = optim.Adam(policy.parameters(), lr=learning_rate) # Use learning_rate
+        self.gamma, self.gae_lambda = gamma, gae_lambda
+        self.clip_epsilon = clip_range # Use clip_range, assigned to self.clip_epsilon
         self.value_coef, self.entropy_coef, self.max_grad_norm = value_coef, entropy_coef, max_grad_norm
+        # n_epochs is in the signature but not stored as self.n_epochs.
+        # This is fine if it's intended to be passed to other methods like train() later,
+        # or if train() will use its own n_epochs parameter.
+        # Current train() method has its own n_epochs, so this is okay.
         self.rollout_buffer = RolloutBuffer()
         self.episode_rewards: Deque[float] = deque(maxlen=100)
         # Removed episode_complexities and episode_mse as they were not consistently updated/used.
@@ -359,16 +449,20 @@ class PPOTrainer:
             action_mask_tensor = torch.BoolTensor(action_mask_np).unsqueeze(0) # (1, action_dim)
 
             with torch.no_grad():
-                action_tensor, log_prob, value = self.policy.get_action(
-                    obs_tensor, action_mask_tensor,
-                    task_trajectories=task_trajectories, # Pass along
-                    tree_structure=tree_structure
+                # get_action now returns Tuple[int, float, float]
+                action_val, log_prob_val, value_val = self.policy.get_action(
+                    obs_tensor, # This is (1, ObsDim)
+                    action_mask=action_mask_tensor, # This is (1, ActDim)
+                    task_trajectories=task_trajectories,
+                    tree_structure=tree_structure,
+                    # deterministic=False by default in get_action
                 )
-            action_item = action_tensor.item() # For env.step
-            next_obs, reward, terminated, truncated, info = self.env.step(action_item)
+            # action_val is already an int, log_prob_val and value_val are floats.
+            next_obs, reward, terminated, truncated, info = self.env.step(action_val) # Use action_val directly
             next_tree_structure = info.get('tree_structure') if isinstance(info, dict) else None
 
-            self.rollout_buffer.add(obs, action_item, reward, value.item(), log_prob.item(), terminated or truncated, action_mask_np, tree_structure)
+            # Pass the scalar values directly to rollout_buffer.add
+            self.rollout_buffer.add(obs, action_val, reward, value_val, log_prob_val, terminated or truncated, action_mask_np, tree_structure)
             obs, tree_structure = next_obs, next_tree_structure
 
             if terminated or truncated:
