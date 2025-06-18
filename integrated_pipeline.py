@@ -382,11 +382,12 @@ class AdvancedJanusTrainer:
     
     def _train_basic(self):
         """Basic training loop."""
+        # Use parameters from the configuration for consistency and control.
         self.trainer.train(
             total_timesteps=self.config.total_timesteps,
-            rollout_length=2048,
-            n_epochs=10,
-            log_interval=10
+            rollout_length=self.config.ppo_rollout_length,
+            n_epochs=self.config.ppo_n_epochs,
+            log_interval=self.config.log_interval
         )
     
     def _train_selfplay(self):
