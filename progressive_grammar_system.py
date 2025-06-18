@@ -258,15 +258,22 @@ class ProgressiveGrammar:
     def __init__(self,
                  max_variables: int = 20,
                  noise_threshold: float = 0.1,
-                 mdl_threshold: float = 10.0):
+                 mdl_threshold: float = 10.0,
+                 load_defaults: bool = True): # Add this new argument
 
         # Core grammar components
         self.primitives = {
-            'constants': {'0': 0, '1': 1, 'pi': np.pi, 'e': np.e},
-            'binary_ops': {'+', '-', '*', '/', '**'},
-            'unary_ops': {'neg', 'inv', 'sqrt', 'log', 'exp', 'sin', 'cos'},
-            'calculus_ops': {'diff', 'int'}
+            'constants': {},
+            'binary_ops': set(),
+            'unary_ops': set(),
+            'calculus_ops': set()
         }
+
+        if load_defaults:
+            self.primitives['constants'] = {'0': 0, '1': 1, 'pi': np.pi, 'e': np.e}
+            self.primitives['binary_ops'] = {'+', '-', '*', '/', '**'}
+            self.primitives['unary_ops'] = {'neg', 'inv', 'sqrt', 'log', 'exp', 'sin', 'cos'}
+            self.primitives['calculus_ops'] = {'diff', 'int'}
 
         # Discovered components
         self.variables: Dict[str, 'Variable'] = {}
@@ -281,6 +288,32 @@ class ProgressiveGrammar:
         # Components
         self.denoiser = NoisyObservationProcessor()
         self._expression_cache = {}
+
+    def add_operators(self, operators: List[str]):
+        """
+        Dynamically adds a list of operators to the grammar's primitives,
+        placing them in the correct category (unary, binary, etc.).
+        """
+        # Define known operators and their types
+        known_binary = {'+', '-', '*', '/', '**'}
+        known_unary = {'neg', 'inv', 'sqrt', 'log', 'exp', 'sin', 'cos'}
+        known_calculus = {'diff', 'int'}
+
+        for op in operators:
+            if op in known_binary:
+                self.primitives['binary_ops'].add(op)
+            elif op in known_unary:
+                self.primitives['unary_ops'].add(op)
+            elif op in known_calculus:
+                self.primitives['calculus_ops'].add(op)
+            # Handle special cases from your MAML script
+            elif op == '**2' or op == '**3':
+                self.primitives['binary_ops'].add('**')
+            elif op == '1/':
+                self.primitives['unary_ops'].add('inv')
+            else:
+                # This can be extended if you add more custom operators
+                print(f"Warning: Operator '{op}' has unknown arity and was not added.")
 
     def discover_variables(self,
                           observations: np.ndarray,
