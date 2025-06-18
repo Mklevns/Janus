@@ -227,6 +227,8 @@ class HypothesisNet(nn.Module):
                 tree_structure: Optional[Dict[int, List[int]]] = None # Added for TreeEncoder
                 ) -> Dict[str, Union[torch.Tensor, Optional[torch.Tensor]]]:
         batch_size, obs_dim = observation.shape
+        if obs_dim % self.node_feature_dim != 0:
+            raise ValueError("Observation dimension must be a multiple of node_feature_dim.")
         num_nodes = obs_dim // self.node_feature_dim
         tree_features = observation.view(batch_size, num_nodes, self.node_feature_dim)
 
@@ -316,7 +318,13 @@ class HypothesisNet(nn.Module):
         outputs = self.forward(observation, action_mask, task_trajectories, tree_structure) # Pass tree_structure
         dist = Categorical(logits=outputs['action_logits'])
         action = torch.argmax(outputs['action_logits'], dim=-1) if deterministic else dist.sample()
-        log_prob = dist.log_prob(action)
+        log_prob = dist.log_prob(action) # action is shape (B,)
+
+        if observation.shape[0] == 1: # If batch size is 1
+            action = action.squeeze(0)    # (1,) -> ()
+            log_prob = log_prob.squeeze(0)  # (1,) -> ()
+            # value from forward is (B, 1). If B=1, it's (1,1), which matches the test. So no change to value.
+
         return action, log_prob, outputs['value'] # Return action tensor
 
 class PPOTrainer:
