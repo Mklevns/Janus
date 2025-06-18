@@ -193,28 +193,24 @@ if __name__ == '__main__':
     score_ke = detector.symmetry_guided_score(kinetic_energy_law, mock_trajectory, params_ke, expected_symmetries=['velocity_parity', 'time_reversal', 'rotational'])
     print(f"Symmetry Guided Score for KE: {score_ke}")
 
-    print("
---- Testing Potential Energy Law (m*g*y) ---")
+    print("\n--- Testing Potential Energy Law (m*g*y) ---")
     symmetries_pe = detector.detect_all_symmetries(potential_energy_law, mock_trajectory, params_pe)
     print(f"Detected Symmetries for PE: {symmetries_pe}")
     score_pe = detector.symmetry_guided_score(potential_energy_law, mock_trajectory, params_pe, expected_symmetries=['velocity_parity', 'time_reversal', 'translation'])
     print(f"Symmetry Guided Score for PE: {score_pe}")
 
-    print("
---- Testing Simple Force Law (-k*x) ---")
+    print("\n--- Testing Simple Force Law (-k*x) ---")
     symmetries_force = detector.detect_all_symmetries(simple_force_law, mock_trajectory, params_force)
     print(f"Detected Symmetries for Force Law: {symmetries_force}")
     score_force = detector.symmetry_guided_score(simple_force_law, mock_trajectory, params_force, expected_symmetries=['velocity_parity'])
     print(f"Symmetry Guided Score for Force Law: {score_force}")
 
-    print("
---- Specific Symmetry Checks for KE ---")
+    print("\n--- Specific Symmetry Checks for KE ---")
     print(f"Velocity Parity (KE): {detector._check_velocity_parity(kinetic_energy_law, mock_trajectory, params_ke)}")
     print(f"Translational Symmetry (KE): {detector._check_translational_symmetry(kinetic_energy_law, mock_trajectory, params_ke)}")
     print(f"Rotational Symmetry (KE, 2D): {detector._check_rotational_symmetry(kinetic_energy_law, mock_trajectory, params_ke)}")
 
-    print("
---- Specific Symmetry Checks for PE (mgy) ---")
+    print("\n--- Specific Symmetry Checks for PE (mgy) ---")
     print(f"Velocity Parity (PE): {detector._check_velocity_parity(potential_energy_law, mock_trajectory, params_pe)}")
     print(f"Translational Symmetry (PE): {detector._check_translational_symmetry(potential_energy_law, mock_trajectory, params_pe)}")
     print(f"Rotational Symmetry (PE, 2D): {detector._check_rotational_symmetry(potential_energy_law, mock_trajectory, params_pe)}")

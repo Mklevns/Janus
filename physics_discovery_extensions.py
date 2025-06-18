@@ -11,6 +11,7 @@ import numpy as np
 import sympy as sp
 from typing import List, Dict, Tuple, Optional, Callable
 from dataclasses import dataclass
+from symmetry_detection_fix import PhysicsSymmetryDetector
 import networkx as nx
 from scipy.optimize import minimize
 from sklearn.metrics import mean_squared_error

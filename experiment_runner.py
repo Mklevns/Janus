@@ -30,6 +30,13 @@ import importlib.metadata # For plugin discovery
 from custom_exceptions import MissingDependencyError, PluginNotFoundError, InvalidConfigError, DataGenerationError
 from base_experiment import BaseExperiment # Added
 from math_utils import calculate_symbolic_accuracy
+from robust_hypothesis_extraction import HypothesisTracker, JanusTrainingIntegration
+from conservation_reward_fix import ConservationBiasedReward
+from symmetry_detection_fix import PhysicsSymmetryDetector
+from live_monitor import TrainingLogger, LiveMonitor # Assuming live_monitor.py now has these
+from sympy import lambdify, symbols # For converting sympy expr to callable
+from progressive_grammar_system import Expression as SymbolicExpression # Alias to avoid clash if 'Expression' is used elsewhere
+# Pathlib is already imported.
 
 @dataclass
 class ExperimentConfig:
@@ -1298,8 +1305,60 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
         self.algo_registry = algo_registry
         self.env_registry = env_registry
 
+        # Paths for logging and tracking
+        base_output_dir = Path(self.config.algo_params.get('base_output_dir', './experiments_output')) / self.config.name / f"run_{int(time.time())}"
+        self.tracker_save_dir = base_output_dir / "hypothesis_tracking"
+        self.log_file_path = base_output_dir / "training_logs.jsonl" # Changed from .json to .jsonl for line-by-line
+
+        # Ensure directories exist
+        self.tracker_save_dir.mkdir(parents=True, exist_ok=True)
+        if self.log_file_path.parent:
+             self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Initialize new components as per "Complete Integration Example"
+        self.conservation_reward = ConservationBiasedReward(
+            conservation_types=self.config.algo_params.get('conservation_types', ['energy', 'momentum']),
+            weight_factor=self.config.algo_params.get('conservation_weight_factor', 0.3)
+        )
+
+        self.symmetry_detector = PhysicsSymmetryDetector(
+            tolerance=self.config.algo_params.get('symmetry_tolerance', 1e-4),
+            confidence_threshold=self.config.algo_params.get('symmetry_confidence', 0.7)
+        )
+
+        self.hypothesis_tracker = HypothesisTracker(
+            save_directory=str(self.tracker_save_dir),
+            autosave_interval=self.config.algo_params.get('tracker_autosave_interval', 100)
+        )
+
+        self.training_integration = JanusTrainingIntegration(self.hypothesis_tracker)
+
+        # Configure logger backends, allow for 'redis' if specified in config
+        logger_backends = self.config.algo_params.get('logger_backends', ["file"])
+        self.training_logger = TrainingLogger(
+            backends=logger_backends, # e.g. ["file", "redis"]
+            log_file_path=str(self.log_file_path),
+            redis_host=self.config.algo_params.get('redis_host', 'localhost'),
+            redis_port=self.config.algo_params.get('redis_port', 6379),
+            redis_channel=f"janus_{self.config.name}_metrics"
+        )
+
+        # Configure LiveMonitor data source
+        monitor_data_source = "redis" if "redis" in logger_backends else "file"
+        self.live_monitor = LiveMonitor(
+            data_source=monitor_data_source,
+            log_file_path=str(self.log_file_path), # Monitor tails this file if source is 'file'
+            redis_host=self.config.algo_params.get('redis_host', 'localhost'),
+            redis_port=self.config.algo_params.get('redis_port', 6379),
+            redis_channel=f"janus_{self.config.name}_metrics" # Same channel as logger publishes to
+        )
+
         # Attributes to be populated by setup()
         self.physics_env: Optional[PhysicsEnvironment] = None
+        self.env_data: Optional[np.ndarray] = None # Full trajectory data for reference
+        self.ground_truth_trajectory_processed: Optional[Dict[str,Any]] = None # For conservation checks
+        self.variables: Optional[List[Any]] = None # progressive_grammar_system.Variable objects
+        self.sympy_vars: Optional[List[sp.Symbol]] = None # Sympy symbols for lambdify
         self.env_data: Optional[np.ndarray] = None
         self.variables: Optional[List[Any]] = None
         self.algorithm: Optional[Any] = None
@@ -1384,11 +1443,43 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
         self.algorithm = algo_factory(self.env_data, self.variables, self.config)
         logging.info(f"[{self.config.name}] Algorithm '{self.config.algorithm}' created: {type(self.algorithm).__name__}")
 
+        # Initialize Hypothesis Tracker and Training Integration
+        # save_directory can be made more configurable if needed
+        tracker_save_dir = Path(self.config.base_dir if hasattr(self.config, 'base_dir') else "./experiments") / self.config.name / "hypothesis_tracking"
+        self.hypothesis_tracker = HypothesisTracker(
+            save_directory=str(tracker_save_dir),
+            autosave_interval=self.config.algo_params.get('tracker_autosave_interval', 100)
+        )
+        self.training_integration = JanusTrainingIntegration(self.hypothesis_tracker)
+        logging.info(f"[{self.config.name}] HypothesisTracker initialized. Save dir: {tracker_save_dir}")
+
         # 5. Get Ground Truth Laws
         if self.physics_env:
             self.ground_truth_laws = self.physics_env.get_ground_truth_laws()
             logging.debug(f"[{self.config.name}] Ground truth laws obtained: {list(self.ground_truth_laws.keys()) if self.ground_truth_laws else 'None'}.")
+
+        # Prepare ground_truth_trajectory_processed and sympy_vars
+        if self.physics_env and hasattr(self.physics_env, 'get_ground_truth_conserved_quantities'):
+            # Assumes env can provide a dict like {'conserved_energy': val, 'conserved_momentum': val}
+            # This might need to be based on the full self.env_data
+            self.ground_truth_trajectory_processed = self.physics_env.get_ground_truth_conserved_quantities(self.env_data, self.variables)
+        else:
+            # Fallback: This might be just the raw trajectory data, and conservation_reward_fix
+            # would need to infer or calculate conserved quantities from it.
+            # For simplicity, let's assume env_data itself can be used by compute_conservation_bonus
+            # if it expects values like energy, momentum directly.
+            # The compute_conservation_bonus in conservation_reward_fix.py expects dicts.
+            # Let's assume self.env_data is a numpy array. We need to structure it.
+            # This part is complex and depends on how conserved quantities are defined and extracted.
+            # Placeholder:
+            self.ground_truth_trajectory_processed = {'raw_data': self.env_data}
+            # Also create sympy_vars for lambdify
+        if self.variables:
+            self.sympy_vars = [symbols(v.name) for v in self.variables]
+
         logging.info(f"[{self.config.name}] Setup phase complete.")
+        self.live_monitor.start_monitoring()
+        logging.info(f"[{self.config.name}] Live monitor started.")
 
     def _get_initial_conditions(self) -> np.ndarray:
         """Helper to determine initial conditions based on environment type."""
@@ -1470,33 +1561,71 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
                 best_mse_overall = float('inf')
                 best_expr_overall = None
                 efficiency_curve = []
+                current_total_steps = 0 # Initialize current_total_steps
 
                 for i in range(num_evals):
                     trainer.train(total_timesteps=steps_per_eval, **ppo_params)
-                    current_total_steps = (i + 1) * steps_per_eval
-                    # Evaluation logic (simplified, assumes trainer.env has a cache)
-                    if hasattr(trainer, 'env') and hasattr(trainer.env, '_evaluation_cache'):
-                        # Logic to get best expression and MSE from cache
-                        # This is highly dependent on SymbolicDiscoveryEnv's implementation
-                        # For now, let's assume a method get_best_solution() exists or similar
-                        # current_expr, current_mse_cached = trainer.env.get_best_solution_from_cache()
-                        # This is a placeholder - actual eval needs robust implementation
-                        # Using a simplified approach based on previous logic:
-                        temp_best_mse_in_cache = float('inf')
-                        temp_best_expr_in_cache = None
-                        if trainer.env._evaluation_cache: # If cache is list of dicts
-                             for entry in trainer.env._evaluation_cache:
-                                if entry.get('mse', float('inf')) < temp_best_mse_in_cache:
-                                    temp_best_mse_in_cache = entry['mse']
-                                    temp_best_expr_in_cache = entry.get('expression')
+                    current_total_steps += steps_per_eval # Accumulate steps
 
-                        if temp_best_expr_in_cache and temp_best_mse_in_cache < best_mse_overall:
-                            best_mse_overall = temp_best_mse_in_cache
-                            best_expr_overall = temp_best_expr_in_cache
+                    current_step_in_loop = i # Or map to global step if available
+
+                    # New hypothesis recording logic
+                    if hasattr(trainer, 'env') and hasattr(trainer.env, '_evaluation_cache') and self.training_integration:
+                        # Ideally, SymbolicDiscoveryEnv would call on_hypothesis_evaluated directly.
+                        # For now, we process its cache here as a bridge.
+                        # This cache should ideally be cleared by the env after each cycle if we process it like this.
+                        for eval_entry in trainer.env._evaluation_cache: # This cache might contain more than just the last cycle
+                            hyp_data = eval_entry.get('expression_obj', {'expression_str': eval_entry.get('expression')}) # Adapt as per actual cache structure
+
+                            # We need to assemble evaluation_results for on_hypothesis_evaluated
+                            # The old cache had 'mse'. We need performance_score, conservation_score, etc.
+                            # This part requires that the environment's evaluation cache is richer,
+                            # or these scores are computed here.
+                            # For now, let's assume a basic structure. This will be refined in Step 6.
+                            eval_results_for_tracker = {
+                                'performance_score': -eval_entry.get('mse', float('inf')), # Assuming performance is inverse of MSE
+                                'conservation_score': eval_entry.get('conservation_score', 0.0), # Needs to be populated by env
+                                'symmetry_score': eval_entry.get('symmetry_score', 0.0), # Needs to be populated by env
+                                'trajectory_fit': eval_entry.get('mse', float('inf')),
+                                'functional_form': str(eval_entry.get('expression'))
+                            }
+
+                            self.training_integration.on_hypothesis_evaluated(
+                                hypothesis_data=hyp_data,
+                                evaluation_results=eval_results_for_tracker,
+                                step=current_total_steps, # Global step
+                                episode=current_step_in_loop # Current eval cycle as episode
+                            )
+                        if hasattr(trainer.env, 'clear_evaluation_cache'): # Ideal: trainer.env.clear_evaluation_cache()
+                            pass # trainer.env.clear_evaluation_cache() # Call if available
+
+
+                    # Update best_expr_overall and best_mse_overall using the tracker
+                    if self.training_integration:
+                        best_hyp = self.training_integration.get_best_discovered_law(criterion='overall')
+                        if best_hyp:
+                            best_expr_overall = best_hyp['hypothesis_data'] # Or specific field like 'expression_str'
+                            # Assuming performance_score in tracker is primary metric, might be -MSE
+                            eval_res = best_hyp['evaluation_results']
+                            best_mse_overall = eval_res.get('trajectory_fit', -eval_res.get('performance_score', float('inf')))
+
                     efficiency_curve.append((current_total_steps, best_mse_overall))
+                    # The rest of the loop continues...
 
-                current_run_result.discovered_law = str(best_expr_overall) if best_expr_overall else None
-                current_run_result.predictive_mse = best_mse_overall
+                # After the loop, populate current_run_result from the tracker's best
+                if self.training_integration:
+                    final_best_hyp_after_loop = self.training_integration.get_best_discovered_law(criterion='overall')
+                    if final_best_hyp_after_loop:
+                        current_run_result.discovered_law = str(final_best_hyp_after_loop['hypothesis_data'].get('expression_str', final_best_hyp_after_loop['hypothesis_data']))
+                        eval_res_final = final_best_hyp_after_loop['evaluation_results']
+                        current_run_result.predictive_mse = eval_res_final.get('trajectory_fit', -eval_res_final.get('performance_score', float('inf')))
+                        current_run_result.law_complexity = len(str(current_run_result.discovered_law)) # Simplified
+                        current_run_result.component_metrics['conservation_score'] = eval_res_final.get('conservation_score')
+                        current_run_result.component_metrics['symmetry_score'] = eval_res_final.get('symmetry_score')
+                    else: # Fallback if tracker is empty
+                        current_run_result.discovered_law = str(best_expr_overall) if best_expr_overall else None
+                        current_run_result.predictive_mse = best_mse_overall
+
                 current_run_result.sample_efficiency_curve = efficiency_curve
                 current_run_result.n_experiments_to_convergence = num_evals # Or steps, depending on definition
 
@@ -1640,12 +1769,13 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
             # Depending on desired behavior, could re-raise e here
         finally:
             current_wall_time = time.time() - self._start_time
-            if self.experiment_result: # Ensure it exists
+            if self.experiment_result:
                 self.experiment_result.wall_time_seconds = current_wall_time
 
-            logging.info(f"[{self.config.name}] EXECUTE: Starting teardown (run {run_id}). Wall time: {current_wall_time:.2f}s.")
-            self.teardown()
-            logging.info(f"[{self.config.name}] EXECUTE: Teardown complete (run {run_id}).")
+            logging.info(f"[{self.config.name}] EXECUTE: Starting teardown and cleanup (run {run_id}). Wall time: {current_wall_time:.2f}s.")
+            self.cleanup() # Call new cleanup method
+            self.teardown() # Call original teardown
+            logging.info(f"[{self.config.name}] EXECUTE: Teardown and cleanup complete (run {run_id}).")
 
         # Final check to ensure an ExperimentResult object is always returned.
         if not self.experiment_result:
@@ -1697,6 +1827,12 @@ if __name__ == "__main__":
         self.config = config
         self.algo_registry = algo_registry
         self.env_registry = env_registry
+        self.hypothesis_tracker: Optional[HypothesisTracker] = None
+        self.training_integration: Optional[JanusTrainingIntegration] = None
+        # Logger and monitor will be added in a later step for Gap 3 integration
+        self.training_logger: Optional[Any] = None # Placeholder for TrainingLogger
+        self.live_monitor: Optional[Any] = None # Placeholder for LiveMonitor
+
 
         # Attributes to be populated by setup()
         self.physics_env: Optional[PhysicsEnvironment] = None
@@ -1791,6 +1927,16 @@ if __name__ == "__main__":
             raise InvalidConfigError(f"Failed to create algorithm '{self.config.algorithm}' with the provided configuration: {e}") from e
         logging.info(f"[{self.config.name}] Algorithm '{self.config.algorithm}' created: {type(self.algorithm).__name__}")
 
+        # Initialize Hypothesis Tracker and Training Integration
+        # save_directory can be made more configurable if needed
+        tracker_save_dir = Path(self.config.base_dir if hasattr(self.config, 'base_dir') else "./experiments") / self.config.name / "hypothesis_tracking"
+        self.hypothesis_tracker = HypothesisTracker(
+            save_directory=str(tracker_save_dir),
+            autosave_interval=self.config.algo_params.get('tracker_autosave_interval', 100)
+        )
+        self.training_integration = JanusTrainingIntegration(self.hypothesis_tracker)
+        logging.info(f"[{self.config.name}] HypothesisTracker initialized. Save dir: {tracker_save_dir}")
+
         # 5. Get Ground Truth Laws
         if self.physics_env:
             self.ground_truth_laws = self.physics_env.get_ground_truth_laws()
@@ -1869,43 +2015,205 @@ if __name__ == "__main__":
         algo_name = self.config.algorithm
         try:
             if algo_name.startswith('janus'): # Example: Janus PPO-based
-                trainer = self.algorithm # Assuming self.algorithm is the PPO trainer
-                num_evals = self.config.algo_params.get('num_evaluations', 50)
-                steps_per_eval = self.config.algo_params.get('timesteps_per_eval_cycle', 1000)
+                trainer = self.algorithm
+                num_eval_cycles = self.config.algo_params.get('num_evaluation_cycles', 50) # Renamed
+                steps_per_cycle = self.config.algo_params.get('timesteps_per_eval_cycle', 1000)
                 ppo_params = self.config.algo_params.get('ppo_train_params', {})
 
-                best_mse_overall = float('inf')
-                best_expr_overall = None
-                efficiency_curve = []
+                efficiency_curve = [] # Remains for tracking overall best MSE per cycle
+                current_total_steps = 0
+                # best_mse_overall will be derived from tracker for efficiency_curve later
 
-                for i in range(num_evals):
-                    trainer.train(total_timesteps=steps_per_eval, **ppo_params)
-                    current_total_steps = (i + 1) * steps_per_eval
-                    # Evaluation logic (simplified, assumes trainer.env has a cache)
+                for cycle_idx in range(num_eval_cycles): # Renamed loop variable
+                    trainer.train(total_timesteps=steps_per_cycle, **ppo_params)
+                    current_total_steps += steps_per_cycle
+
+                    evaluated_hypotheses_in_cycle = []
                     if hasattr(trainer, 'env') and hasattr(trainer.env, '_evaluation_cache'):
-                        # Logic to get best expression and MSE from cache
-                        # This is highly dependent on SymbolicDiscoveryEnv's implementation
-                        # For now, let's assume a method get_best_solution() exists or similar
-                        # current_expr, current_mse_cached = trainer.env.get_best_solution_from_cache()
-                        # This is a placeholder - actual eval needs robust implementation
-                        # Using a simplified approach based on previous logic:
-                        temp_best_mse_in_cache = float('inf')
-                        temp_best_expr_in_cache = None
-                        if trainer.env._evaluation_cache: # If cache is list of dicts
-                             for entry in trainer.env._evaluation_cache:
-                                if entry.get('mse', float('inf')) < temp_best_mse_in_cache:
-                                    temp_best_mse_in_cache = entry['mse']
-                                    temp_best_expr_in_cache = entry.get('expression')
+                        evaluated_hypotheses_in_cycle = list(trainer.env._evaluation_cache)
+                        if hasattr(trainer.env, 'clear_evaluation_cache'):
+                            trainer.env.clear_evaluation_cache()
 
-                        if temp_best_expr_in_cache and temp_best_mse_in_cache < best_mse_overall:
-                            best_mse_overall = temp_best_mse_in_cache
-                            best_expr_overall = temp_best_expr_in_cache
-                    efficiency_curve.append((current_total_steps, best_mse_overall))
+                    for hyp_eval_entry in evaluated_hypotheses_in_cycle:
+                        hypothesis_object = hyp_eval_entry.get('expression_obj')
+                        if not isinstance(hypothesis_object, SymbolicExpression): # Check type
+                            hyp_str = hyp_eval_entry.get('expression', '')
+                            # Attempt to parse if it's a string and grammar is available
+                            # This is a fallback, ideally SymbolicDiscoveryEnv provides SymbolicExpression objects
+                            if hasattr(self, 'grammar_system_instance_if_needed'): # Placeholder for actual grammar access
+                                try:
+                                    # Assuming a parse method on a grammar instance
+                                    # hypothesis_object = self.grammar_system_instance_if_needed.parse(hyp_str)
+                                    pass # Actual parsing logic depends on grammar system
+                                except Exception as e:
+                                    logging.warning(f"[{self.config.name}] Could not parse hypothesis string '{hyp_str}': {e}")
+                                    # If parsing fails or not possible, skip
+                                    if not isinstance(hypothesis_object, SymbolicExpression):
+                                        logging.warning(f"[{self.config.name}] Skipping hypothesis due to missing or unparsable object: {hyp_str}")
+                                        continue
+                            else:
+                                logging.warning(f"[{self.config.name}] Skipping hypothesis with no valid object: {hyp_eval_entry.get('expression')}")
+                                continue
 
-                current_run_result.discovered_law = str(best_expr_overall) if best_expr_overall else None
-                current_run_result.predictive_mse = best_mse_overall
+                        law_params = {}
+                        if hasattr(hypothesis_object, 'get_parameters'):
+                            law_params = hypothesis_object.get_parameters()
+                        elif hasattr(hypothesis_object, 'params'):
+                            law_params = hypothesis_object.params
+
+                        callable_law_function = None
+                        if self.sympy_vars and hasattr(hypothesis_object, 'symbolic') and hypothesis_object.symbolic:
+                            try:
+                                callable_law_function = lambdify(self.sympy_vars, hypothesis_object.symbolic, modules=['numpy', 'sympy'])
+                            except Exception as e:
+                                logging.error(f"[{self.config.name}] Error lambdifying expression {hypothesis_object.symbolic}: {e}")
+
+                        # --- Conservation Bonus Calculation (Sub-task 6.4) ---
+                        conservation_bonus = 0.0
+                        if self.env_data is not None and self.ground_truth_trajectory_processed is not None:
+                            # Placeholder for predicted_traj. A real implementation would evaluate
+                            # the hypothesis_object over a trajectory to get its predicted conserved quantities.
+                            # This placeholder passes a simplified dict. The actual values derived from
+                            # the hypothesis (e.g. its own calculated energy/momentum) are needed here.
+                            # This structure must align with what conservation_reward_fix.py expects.
+                            placeholder_pred_traj_dict = {
+                                f'conserved_{c_type}': None for c_type in self.conservation_reward.conservation_types
+                            }
+                            # Example: if hypothesis_object could evaluate its own energy:
+                            # placeholder_pred_traj_dict['conserved_energy'] = hypothesis_object.calculate_energy(self.env_data, law_params)
+                            # This kind of evaluation is deferred.
+
+                            try:
+                                conservation_bonus = self.conservation_reward.compute_conservation_bonus(
+                                    predicted_traj=placeholder_pred_traj_dict,
+                                    ground_truth_traj=self.ground_truth_trajectory_processed,
+                                    hypothesis_params=law_params
+                                )
+                                logging.debug(f"[{self.config.name}] Cycle {cycle_idx}: Hypothesis {hypothesis_object.symbolic}, Conservation Bonus: {conservation_bonus:.4f}")
+                            except Exception as e:
+                                logging.error(f"[{self.config.name}] Error computing conservation bonus for {hypothesis_object.symbolic}: {e}")
+
+                        # --- Symmetry Detection (Sub-task 6.5) ---
+                        symmetry_results = {}
+                        symmetry_score = 0.0
+                        if callable_law_function and self.env_data is not None:
+                            try:
+                                # Use a sample of env_data for symmetry checks if env_data is large
+                                sample_size = min(100, self.env_data.shape[0])
+                                sample_indices = np.random.choice(self.env_data.shape[0], size=sample_size, replace=False)
+                                sample_traj_for_symmetry = self.env_data[sample_indices]
+
+                                # Ensure sample_traj_for_symmetry has enough dimensions for symmetry detector if it expects specific shapes
+                                # The current symmetry_detection_fix.py _check_velocity_parity expects state_vector [pos, vel, ...]
+                                # This implies self.env_data columns need to align with this.
+                                # This alignment is a deeper issue related to environment data structure.
+                                # For now, we pass the sample as is.
+
+                                symmetry_results = self.symmetry_detector.detect_all_symmetries(
+                                    law_function=callable_law_function,
+                                    trajectory=sample_traj_for_symmetry,
+                                    params=law_params
+                                )
+                                symmetry_score = self.symmetry_detector.symmetry_guided_score(
+                                    law_function=callable_law_function,
+                                    trajectory=sample_traj_for_symmetry,
+                                    params=law_params,
+                                    expected_symmetries=self.config.algo_params.get('expected_symmetries', ['velocity_parity', 'time_reversal'])
+                                )
+                                logging.debug(f"[{self.config.name}] Cycle {cycle_idx}: Hypothesis {hypothesis_object.symbolic}, Symmetry Score: {symmetry_score:.4f}, Results: {symmetry_results}")
+                            except Exception as e:
+                                logging.error(f"[{self.config.name}] Error during symmetry detection for {hypothesis_object.symbolic}: {e}")
+
+                        # --- Hypothesis Recording and Logging (Sub-task 6.6) ---
+                        base_performance_score = -hyp_eval_entry.get('mse', float('inf')) # Higher is better
+                        trajectory_fit_error = hyp_eval_entry.get('mse', float('inf')) # Lower is better
+                        current_complexity = getattr(hypothesis_object, 'complexity', len(str(hypothesis_object.symbolic)))
+
+                        if self.training_integration:
+                            self.training_integration.on_hypothesis_evaluated(
+                                hypothesis_data={ # Store rich hypothesis data
+                                    'expression_str': str(hypothesis_object.symbolic),
+                                    'sympy_expr': str(hypothesis_object.symbolic), # Assuming .symbolic is sympy compatible string
+                                    'object_type': type(hypothesis_object).__name__,
+                                    # Potentially store a serialized version of hypothesis_object if feasible and small
+                                },
+                                evaluation_results={
+                                    'performance_score': base_performance_score, # Overall score, higher is better
+                                    'conservation_score': conservation_bonus,    # Higher is better
+                                    'symmetry_score': symmetry_score,            # Higher is better
+                                    'trajectory_fit': trajectory_fit_error,    # Error metric, lower is better
+                                    'functional_form': str(hypothesis_object.symbolic),
+                                    'complexity': current_complexity
+                                },
+                                step=current_total_steps,
+                                episode=cycle_idx,
+                                training_context={'environment': self.config.environment_type, 'algorithm_cycle': cycle_idx}
+                            )
+
+                        if self.training_logger:
+                            best_overall_from_tracker = self.training_integration.get_best_discovered_law(criterion='overall') if self.training_integration else None
+                            best_overall_score_for_log = best_overall_from_tracker['evaluation_results']['performance_score'] if best_overall_from_tracker else -float('inf')
+
+                            # Placeholder for entropy production - this would require more complex calculation
+                            entropy_production_val = 0.0
+
+                            self.training_logger.log_metrics(
+                                step=current_total_steps,
+                                episode=cycle_idx,
+                                reward_components_sum=base_performance_score + conservation_bonus + symmetry_score, # Example composite reward
+                                base_performance=base_performance_score,
+                                conservation_bonus=conservation_bonus,
+                                symmetry_score=symmetry_score,
+                                current_hypothesis_trajectory_fit=trajectory_fit_error,
+                                current_hypothesis_complexity=current_complexity,
+                                discovered_law_params=law_params,
+                                best_overall_score_tracker=best_overall_score_for_log,
+                                entropy_production=entropy_production_val
+                                # Add more specific metrics from symmetry_results if needed, e.g. symmetry_results.get('translation_score',0)
+                            )
+
+                    # --- End of loop for evaluated_hypotheses_in_cycle ---
+
+                    # Update efficiency curve based on overall best from tracker after this cycle
+                    if self.training_integration:
+                        best_hyp_for_curve = self.training_integration.get_best_discovered_law(criterion='overall')
+                        if best_hyp_for_curve:
+                            eval_res_curve = best_hyp_for_curve['evaluation_results']
+                            # Use trajectory_fit (lower is better) for efficiency curve tracking MSE
+                            mse_for_curve = eval_res_curve.get('trajectory_fit', float('inf'))
+                            efficiency_curve.append((current_total_steps, mse_for_curve))
+                        elif efficiency_curve:
+                            efficiency_curve.append((current_total_steps, efficiency_curve[-1][1]))
+                        else:
+                             efficiency_curve.append((current_total_steps, float('inf')))
+                    else:
+                        efficiency_curve.append((current_total_steps, float('inf')))
+
+                # Final result population using the tracker
+                if self.training_integration:
+                    final_best_hyp = self.training_integration.get_best_discovered_law(criterion='overall')
+                    if final_best_hyp:
+                        hyp_data_final = final_best_hyp['hypothesis_data']
+                        # Extract expression string, preferring 'expression_str' or 'sympy_expr' if available
+                        if isinstance(hyp_data_final, dict):
+                            current_run_result.discovered_law = str(hyp_data_final.get('expression_str', hyp_data_final.get('sympy_expr', str(hyp_data_final))))
+                        else: # Fallback if hyp_data_final is not a dict (e.g., the object itself)
+                            current_run_result.discovered_law = str(hyp_data_final)
+
+                        eval_res_final = final_best_hyp['evaluation_results']
+                        current_run_result.predictive_mse = eval_res_final.get('trajectory_fit', -eval_res_final.get('performance_score', float('inf')))
+                        current_run_result.law_complexity = eval_res_final.get('complexity', len(str(current_run_result.discovered_law)))
+                        current_run_result.component_metrics['conservation_score'] = eval_res_final.get('conservation_score')
+                        current_run_result.component_metrics['symmetry_score'] = eval_res_final.get('symmetry_score')
+                    else: # If tracker is empty or has no 'overall' best
+                        current_run_result.discovered_law = None
+                        current_run_result.predictive_mse = float('inf') # Keep as inf if no law found
+                else: # Fallback if no training_integration
+                    current_run_result.discovered_law = None
+                    current_run_result.predictive_mse = float('inf')
+
                 current_run_result.sample_efficiency_curve = efficiency_curve
-                current_run_result.n_experiments_to_convergence = num_evals # Or steps, depending on definition
+                current_run_result.n_experiments_to_convergence = num_eval_cycles
 
             elif algo_name == 'genetic': # Example: SymbolicRegressor
                 regressor = self.algorithm
@@ -2046,12 +2354,13 @@ if __name__ == "__main__":
                 self.experiment_result.predictive_mse = float('inf')
         finally:
             current_wall_time = time.time() - self._start_time
-            if self.experiment_result: # Ensure it exists
+            if self.experiment_result:
                 self.experiment_result.wall_time_seconds = current_wall_time
 
-            logging.info(f"[{self.config.name}] EXECUTE: Starting teardown (run {run_id}). Wall time: {current_wall_time:.2f}s.")
-            self.teardown()
-            logging.info(f"[{self.config.name}] EXECUTE: Teardown complete (run {run_id}).")
+            logging.info(f"[{self.config.name}] EXECUTE: Starting teardown and cleanup (run {run_id}). Wall time: {current_wall_time:.2f}s.")
+            self.cleanup() # Call new cleanup method
+            self.teardown() # Call original teardown
+            logging.info(f"[{self.config.name}] EXECUTE: Teardown and cleanup complete (run {run_id}).")
 
         # Final check to ensure an ExperimentResult object is always returned.
         if not self.experiment_result:
@@ -2062,6 +2371,61 @@ if __name__ == "__main__":
             self.experiment_result.wall_time_seconds = time.time() - self._start_time
 
         return self.experiment_result
+
+    def get_best_discovered_law(self) -> Optional[Dict[str, Any]]:
+        """Gets the best discovered law from the hypothesis tracker."""
+        if not self.training_integration:
+            logging.warning(f"[{self.config.name}] Training integration not initialized. Cannot get best law.")
+            return None
+        return self.training_integration.get_best_discovered_law(criterion='overall')
+
+    def get_training_statistics(self) -> Optional[Dict[str, Any]]:
+        """Gets training statistics from the hypothesis tracker."""
+        if not self.hypothesis_tracker:
+            logging.warning(f"[{self.config.name}] Hypothesis tracker not initialized. Cannot get stats.")
+            return None
+        return self.hypothesis_tracker.get_training_statistics()
+
+    def export_results(self, output_file_base: str = "experiment_export"):
+        """Exports key results from the hypothesis tracker."""
+        if not self.hypothesis_tracker:
+            logging.warning(f"[{self.config.name}] Hypothesis tracker not initialized. Cannot export.")
+            return
+
+        export_dir = Path(self.hypothesis_tracker.save_directory) / "exports" # Ensure self.tracker_save_dir is used if self.hypothesis_tracker.save_directory is not set early
+        if hasattr(self.hypothesis_tracker, 'save_directory') and self.hypothesis_tracker.save_directory:
+            export_dir = Path(self.hypothesis_tracker.save_directory) / "exports"
+        elif hasattr(self, 'tracker_save_dir'): # Fallback to tracker_save_dir from __init__
+             export_dir = self.tracker_save_dir / "exports"
+        else: # Absolute fallback
+            logging.warning(f"[{self.config.name}] save_directory for hypothesis_tracker not found, using default ./exports")
+            export_dir = Path("./exports")
+
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        self.hypothesis_tracker.export_best_hypotheses(
+            str(export_dir / f"{output_file_base}_best_overall.json"), criterion='overall', n=10, format='json'
+        )
+        self.hypothesis_tracker.export_best_hypotheses(
+            str(export_dir / f"{output_file_base}_best_conservation.json"), criterion='conservation', n=10, format='json'
+        )
+        # Add more exports if needed
+        logging.info(f"[{self.config.name}] Results exported to {export_dir}")
+
+    def cleanup(self):
+        """Cleans up resources, like saving final tracker state or stopping monitor."""
+        logging.info(f"[{self.config.name}] Performing cleanup...")
+        if self.hypothesis_tracker and hasattr(self.hypothesis_tracker, 'save_state'): # Check for save_state method
+            self.hypothesis_tracker.save_state()
+            logging.info(f"[{self.config.name}] Hypothesis tracker state saved.")
+
+        if self.live_monitor and hasattr(self.live_monitor, 'stop_monitoring'): # Check attribute and method
+            self.live_monitor.stop_monitoring()
+            logging.info(f"[{self.config.name}] Live monitor stopped.")
+
+        if self.training_logger and hasattr(self.training_logger, 'close'): # Check attribute and method
+            self.training_logger.close()
+            logging.info(f"[{self.config.name}] Training logger closed.")
 
 
 if __name__ == "__main__":
