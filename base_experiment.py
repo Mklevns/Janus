@@ -49,6 +49,7 @@ class BaseExperiment(abc.ABC):
         This method ensures that teardown is called even if setup or run
         raise an exception. It also logs the start and end of each phase.
         """
+        self.results = {} # Initialize results dictionary
         try:
             logging.info("Setting up experiment...")
             self.setup()
@@ -59,8 +60,10 @@ class BaseExperiment(abc.ABC):
             logging.info("Experiment run complete.")
         except Exception as e:
             logging.error(f"Exception during experiment setup or run: {e}")
-            # Optionally, re-raise the exception if needed
-            # raise
+            self.results['error'] = str(e)
+            self.results['error_type'] = type(e).__name__
+            # self.results['elapsed_time'] = elapsed # This should already be there or handled by existing code
+            raise
         finally:
             logging.info("Tearing down experiment...")
             self.teardown()
