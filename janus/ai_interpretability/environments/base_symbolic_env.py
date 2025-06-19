@@ -76,8 +76,13 @@ class ExpressionNode:
         if self.node_type != NodeType.OPERATOR:
             return 0
         
-        # The grammar is now the single source of truth
-        return grammar.get_arity(str(self.value))
+        try:
+            # The grammar is now the single source of truth
+            return grammar.get_arity(str(self.value))
+        except ValueError:
+            # Operator not known to the grammar, should not form children
+            logging.warning(f"ExpressionNode: Operator '{self.value}' not found in grammar. Assuming 0 arity for safety.")
+            return 0 # Or raise an error, depending on desired strictness
 
     def to_expression(self, grammar: 'ProgressiveGrammar') -> Optional['GrammarExpression']:
         """Converts this node (and its subtree) to a grammar.Expression object."""

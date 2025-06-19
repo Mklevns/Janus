@@ -217,9 +217,18 @@ class HarmonicOscillatorEnv(PhysicsEnvironment):
     def dynamics(self, state: np.ndarray, t: float) -> np.ndarray:
         x, v = state; return np.array([v, -self.k * x / self.m])
     def generate_trajectory(self, initial_conditions: np.ndarray, t_span: np.ndarray) -> np.ndarray:
-        traj = odeint(self.dynamics, initial_conditions, t_span)
-        x, v = traj.T; energy = 0.5*self.m*v**2 + 0.5*self.k*x**2
-        return self.add_observation_noise(np.column_stack([x, v, energy]))
+        try:
+            traj = odeint(self.dynamics, initial_conditions, t_span)
+            if not np.all(np.isfinite(traj)):
+                raise DataGenerationError(f"{type(self).__name__}: odeint returned non-finite values.")
+            x, v = traj.T; energy = 0.5*self.m*v**2 + 0.5*self.k*x**2
+            final_trajectory = np.column_stack([x, v, energy])
+            if not np.all(np.isfinite(final_trajectory)):
+                # This check is mostly for the computed energy or other derived quantities
+                raise DataGenerationError(f"{type(self).__name__}: Computed quantities (e.g. energy) are non-finite.")
+            return self.add_observation_noise(final_trajectory)
+        except (RuntimeError, ValueError) as e: # Catches issues from odeint or subsequent calculations
+            raise DataGenerationError(f"Error in {type(self).__name__} trajectory generation: {e}") from e
 
 class PendulumEnv(PhysicsEnvironment):
     def __init__(self, params: Dict[str, Any], noise_level: float = 0.0):
@@ -238,11 +247,19 @@ class PendulumEnv(PhysicsEnvironment):
         domega_dt = -self.g*theta/self.l if self.small_angle else -self.g*np.sin(theta)/self.l
         return np.array([omega, domega_dt])
     def generate_trajectory(self, initial_conditions: np.ndarray, t_span: np.ndarray) -> np.ndarray:
-        traj = odeint(self.dynamics, initial_conditions, t_span)
-        theta, omega = traj.T
-        energy = (0.5*self.m*self.l**2*omega**2 + 0.5*self.m*self.g*self.l*theta**2) if self.small_angle \
-                 else (0.5*self.m*self.l**2*omega**2 + self.m*self.g*self.l*(1-np.cos(theta)))
-        return self.add_observation_noise(np.column_stack([theta, omega, energy]))
+        try:
+            traj = odeint(self.dynamics, initial_conditions, t_span)
+            if not np.all(np.isfinite(traj)):
+                raise DataGenerationError(f"{type(self).__name__}: odeint returned non-finite values.")
+            theta, omega = traj.T
+            energy = (0.5*self.m*self.l**2*omega**2 + 0.5*self.m*self.g*self.l*theta**2) if self.small_angle \
+                     else (0.5*self.m*self.l**2*omega**2 + self.m*self.g*self.l*(1-np.cos(theta)))
+            final_trajectory = np.column_stack([theta, omega, energy])
+            if not np.all(np.isfinite(final_trajectory)):
+                raise DataGenerationError(f"{type(self).__name__}: Computed quantities (e.g. energy) are non-finite.")
+            return self.add_observation_noise(final_trajectory)
+        except (RuntimeError, ValueError) as e:
+            raise DataGenerationError(f"Error in {type(self).__name__} trajectory generation: {e}") from e
 
 class KeplerEnv(PhysicsEnvironment):
     def __init__(self, params: Dict[str, Any], noise_level: float = 0.0):
@@ -260,11 +277,19 @@ class KeplerEnv(PhysicsEnvironment):
         dvtheta_dt = -2*vr*vtheta/r if r > 1e-6 else 0 # Avoid division by zero if r is tiny
         return np.array([dr_dt, dtheta_dt, dvr_dt, dvtheta_dt])
     def generate_trajectory(self, initial_conditions: np.ndarray, t_span: np.ndarray) -> np.ndarray:
-        traj = odeint(self.dynamics, initial_conditions, t_span)
-        r, theta, vr, vtheta = traj.T
-        energy = 0.5*(vr**2 + (r*vtheta)**2) - self.G*self.M/r
-        angular_momentum = r**2 * vtheta
-        return self.add_observation_noise(np.column_stack([r, theta, vr, vtheta, energy, angular_momentum]))
+        try:
+            traj = odeint(self.dynamics, initial_conditions, t_span)
+            if not np.all(np.isfinite(traj)):
+                raise DataGenerationError(f"{type(self).__name__}: odeint returned non-finite values.")
+            r, theta, vr, vtheta = traj.T
+            energy = 0.5*(vr**2 + (r*vtheta)**2) - self.G*self.M/r
+            angular_momentum = r**2 * vtheta
+            final_trajectory = np.column_stack([r, theta, vr, vtheta, energy, angular_momentum])
+            if not np.all(np.isfinite(final_trajectory)):
+                raise DataGenerationError(f"{type(self).__name__}: Computed quantities (e.g. energy, ang_momentum) are non-finite.")
+            return self.add_observation_noise(final_trajectory)
+        except (RuntimeError, ValueError) as e:
+            raise DataGenerationError(f"Error in {type(self).__name__} trajectory generation: {e}") from e
 
 
 class ExperimentRunner:
@@ -299,11 +324,22 @@ class ExperimentRunner:
                     self.experiment_plugins[entry_point.name] = loaded_class
                     logging.info(f"Registered experiment plugin: '{entry_point.name}'")
                 else: logging.warning(f"Plugin '{entry_point.name}' not valid. Skipping.")
-            except Exception as e:
-                logging.error(f"Failed to load plugin '{entry_point.name}'. Error: {e}", exc_info=True)
-                if self.strict_mode: # Strict mode check
-                    logging.critical(f"Strict mode: Exiting due to failure in loading plugin '{entry_point.name}'.")
+            except ImportError as e_imp:
+                msg = f"Failed to load plugin '{entry_point.name}' due to Import Error: {e_imp}"
+                logging.error(msg, exc_info=True)
+                if self.strict_mode:
+                    logging.critical(f"Strict mode: Exiting. {msg}")
                     sys.exit(1)
+                # Optionally, re-raise as a more specific custom exception if desired,
+                # for now, it logs and continues if not strict.
+                # raise MissingDependencyError(f"Dependency for plugin '{entry_point.name}' not found: {e_imp}") from e_imp
+            except Exception as e: # Catch other general exceptions during plugin loading
+                msg = f"Failed to load plugin '{entry_point.name}'. Error: {e}"
+                logging.error(msg, exc_info=True)
+                if self.strict_mode: # Strict mode check
+                    logging.critical(f"Strict mode: Exiting. {msg}")
+                    sys.exit(1)
+                # raise PluginNotFoundError(f"Could not load plugin '{entry_point.name}': {e}") from e
         if not self.experiment_plugins: logging.warning("No plugins loaded after processing.")
         else: logging.info(f"Loaded plugins: {list(self.experiment_plugins.keys())}")
 
@@ -352,10 +388,15 @@ class ExperimentRunner:
         logging.info(f"Instantiating experiment '{config.experiment_type}' from {experiment_class.__module__}")
         try:
             experiment_instance = experiment_class(config=config, algo_registry=self.algo_registry, env_registry=self.env_registry)
-        except Exception as e:
+        except InvalidConfigError as e_ic: # Catch specific InvalidConfigError first
+            logging.error(f"Invalid configuration for '{experiment_class.__name__}' for experiment type '{config.experiment_type}'. Error: {e_ic}", exc_info=True)
+            if self.strict_mode: logging.critical(f"Strict mode: Exiting. Configuration error for '{config.experiment_type}': {e_ic}"); sys.exit(1)
+            raise # Re-raise the original InvalidConfigError
+        except Exception as e: # Catch other potential errors during instantiation
             logging.error(f"Failed to instantiate '{experiment_class.__name__}' for '{config.experiment_type}'. Error: {e}", exc_info=True)
             if self.strict_mode: logging.critical(f"Strict mode: Exiting. Instantiation error for '{config.experiment_type}': {e}"); sys.exit(1)
-            raise InvalidConfigError(f"Failed to instantiate '{config.experiment_type}': {e}") from e # Changed to InvalidConfigError for consistency
+            # Wrap other exceptions in InvalidConfigError for consistency, though this might mask the original type
+            raise InvalidConfigError(f"Unexpected error during instantiation of '{config.experiment_type}': {e}") from e
         result = experiment_instance.execute(run_id=run_id)
         if result is None: # Should not happen if execute() guarantees a result
             logging.error(f"Experiment '{config.name}' execute() returned None.")
@@ -498,7 +539,10 @@ if __name__ == "__main__":
             result_main_test = runner_main.run_single_experiment(example_exp_config, run_id=0)
             if result_main_test: print(f"\n--- Result: {result_main_test.discovered_law}, Acc: {result_main_test.symbolic_accuracy:.4f} ---")
             else: print(f"__main__: Experiment '{example_exp_config.name}' no result.")
-        except Exception as e_main: logging.error(f"__main__: Critical error: {e_main}", exc_info=True)
+        except (PluginNotFoundError, InvalidConfigError, DataGenerationError) as e_custom_main:
+            logging.error(f"__main__: Caught specific error: {type(e_custom_main).__name__} - {e_custom_main}", exc_info=True)
+        except Exception as e_main:
+            logging.error(f"__main__: Critical unexpected error: {e_main}", exc_info=True)
     print("\n__main__ Test Section Finished.")
 
 # PhysicsDiscoveryExperiment and other classes (HarmonicOscillatorEnv, etc.) remain largely unchanged
@@ -696,14 +740,33 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
         logging.info(f"[{self.config.name}] Setup: Seed {self.config.seed}, Env '{self.config.environment_type}', Algo '{self.config.algorithm}'.")
         np.random.seed(self.config.seed); torch.manual_seed(self.config.seed)
         env_class = self.env_registry.get(self.config.environment_type)
-        if not env_class: raise ValueError(f"Env type '{self.config.environment_type}' not in registry.")
+        if not env_class:
+            # This case should ideally be caught by ExperimentRunner.run_single_experiment
+            # or result in PluginNotFoundError if env_registry is populated by plugins.
+            # For direct use, InvalidConfigError is more appropriate than ValueError.
+            raise InvalidConfigError(f"Environment type '{self.config.environment_type}' not found in registry.")
+
         self.physics_env = env_class(self.janus_config.env_specific_params, self.config.noise_level)
         trajectories = []
-        for _ in range(self.config.n_trajectories):
-            init_cond = self._get_initial_conditions()
-            t_span = np.arange(0, self.config.trajectory_length * self.config.sampling_rate, self.config.sampling_rate)
-            if self.physics_env: trajectory = self.physics_env.generate_trajectory(init_cond, t_span); trajectories.append(trajectory)
-        if not trajectories: raise ValueError("No trajectories generated.")
+        try:
+            for _ in range(self.config.n_trajectories):
+                init_cond = self._get_initial_conditions()
+                t_span = np.arange(0, self.config.trajectory_length * self.config.sampling_rate, self.config.sampling_rate)
+                if self.physics_env: # Should always be true if env_class was found
+                    trajectory = self.physics_env.generate_trajectory(init_cond, t_span)
+                    trajectories.append(trajectory)
+        except DataGenerationError as dge:
+            logging.error(f"[{self.config.name}] Data generation failed during setup: {dge}", exc_info=True)
+            raise # Re-raise the specific DataGenerationError
+        except Exception as e: # Catch other unexpected errors during trajectory generation
+            logging.error(f"[{self.config.name}] Unexpected error during trajectory generation: {e}", exc_info=True)
+            raise DataGenerationError(f"Unexpected error in trajectory generation for {self.config.environment_type}: {e}") from e
+
+        if not trajectories:
+            # This case implies n_trajectories might have been 0 or generation loop failed silently before,
+            # though the loop itself would raise DataGenerationError now if individual calls fail.
+            raise DataGenerationError(f"No trajectories generated for {self.config.environment_type}. Check n_trajectories and environment setup.")
+
         self.env_data = np.vstack(trajectories)
         logging.info(f"[{self.config.name}] Data shape {self.env_data.shape}.")
         try: from progressive_grammar_system import Variable
@@ -915,9 +978,23 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
 
             if self.ground_truth_laws and current_run_result.discovered_law and not current_run_result.discovered_law.startswith("Error:"):
                 current_run_result.symbolic_accuracy = calculate_symbolic_accuracy(current_run_result.discovered_law, self.ground_truth_laws)
-        except Exception as e:
-            logging.error(f"[{self.config.name}] Algo exec error ('{algo_name}'): {e}", exc_info=True)
-            current_run_result.discovered_law = f"Error: {str(e)[:100]}"
+        except InvalidConfigError as e_ic: # Specific config error from algo setup/run
+            logging.error(f"[{self.config.name}] Algorithm execution failed due to invalid configuration ('{algo_name}'): {e_ic}", exc_info=True)
+            current_run_result.discovered_law = f"Config Error: {str(e_ic)[:100]}"
+            # Optionally re-raise if this should halt the entire experiment suite immediately
+            # raise
+        except DataGenerationError as e_dg: # If an algorithm internally tries to generate more data and fails
+            logging.error(f"[{self.config.name}] Algorithm execution failed due to data generation issues ('{algo_name}'): {e_dg}", exc_info=True)
+            current_run_result.discovered_law = f"Data Error: {str(e_dg)[:100]}"
+            # Optionally re-raise
+            # raise
+        except RuntimeError as e_rt: # Catch general runtime errors from algorithms
+            logging.error(f"[{self.config.name}] Algorithm execution runtime error ('{algo_name}'): {e_rt}", exc_info=True)
+            current_run_result.discovered_law = f"Runtime Error: {str(e_rt)[:100]}"
+        except Exception as e: # Catch-all for other unexpected errors
+            logging.error(f"[{self.config.name}] Unexpected algorithm execution error ('{algo_name}'): {e}", exc_info=True)
+            current_run_result.discovered_law = f"Unexpected Error: {str(e)[:100]}"
+
         logging.info(f"[{self.config.name}] Run done. Law: '{current_run_result.discovered_law}', Acc: {current_run_result.symbolic_accuracy:.4f}")
         return current_run_result
 
@@ -970,11 +1047,17 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
                 if run_specific_result.trajectory_data is not None: self.experiment_result.trajectory_data = run_specific_result.trajectory_data
             else: self.experiment_result.discovered_law = "Error: run() returned None"
             logging.info(f"[{self.config.name}] EXECUTE: Run complete. Law: '{self.experiment_result.discovered_law}'")
-        except Exception as e:
-            logging.error(f"[{self.config.name}] EXECUTE: Exception (run {run_id}): {e}", exc_info=True)
-            if self.experiment_result: self.experiment_result.discovered_law = f"Critical Error: {str(e)[:150]}"
+        except (InvalidConfigError, DataGenerationError, PluginNotFoundError) as e_custom:
+            logging.error(f"[{self.config.name}] EXECUTE: Custom Exception (run {run_id}): {type(e_custom).__name__} - {e_custom}", exc_info=True)
+            if self.experiment_result: self.experiment_result.discovered_law = f"{type(e_custom).__name__}: {str(e_custom)[:150]}"
+            if self.config.janus_config.strict_mode:
+                logging.critical(f"Strict mode: Exiting due to {type(e_custom).__name__} during execute: {e_custom}")
+                sys.exit(1)
+        except Exception as e: # General fallback
+            logging.error(f"[{self.config.name}] EXECUTE: Unexpected Exception (run {run_id}): {e}", exc_info=True)
+            if self.experiment_result: self.experiment_result.discovered_law = f"Unexpected Critical Error: {str(e)[:150]}"
             if self.config.janus_config.strict_mode: # Check strict_mode from JanusConfig
-                logging.critical(f"Strict mode: Exiting due to critical error during execute: {e}")
+                logging.critical(f"Strict mode: Exiting due to unexpected critical error during execute: {e}")
                 sys.exit(1)
             # Not re-raising if not strict mode, allowing teardown
         finally:
