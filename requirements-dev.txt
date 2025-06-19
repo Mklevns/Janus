@@ -1,0 +1,8 @@
+# Testing
+pytest==8.2.2
+
+# Code Formatting & Linting
+black==24.4.2
+isort==5.13.2
+flake8==7.1.0
+mypy==1.10.0
