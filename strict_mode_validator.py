@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Any, Union
 import logging
 from dataclasses import fields
 
-from config_models import JanusConfig
+from janus.config.models import JanusConfig
 
 
 class StrictModeValidator:

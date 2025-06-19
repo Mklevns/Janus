@@ -17,7 +17,8 @@ import time
 from pydantic import BaseModel, Field, model_validator # BaseModel still needed for other configs
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Dict, List, Optional, Any # Ensure Any is available
-from config_models import JanusConfig, SyntheticDataParamsConfig, RewardConfig, CurriculumStageConfig, RayConfig
+from janus.config.models import JanusConfig, SyntheticDataParamsConfig, RewardConfig, CurriculumStageConfig, RayConfig
+from janus.config.loader import ConfigLoader # Added ConfigLoader
 
 # Handle optional imports using safe_import
 ray = safe_import("ray", "ray")
@@ -629,19 +630,23 @@ class AdvancedJanusTrainer:
 def main():
     """Main entry point for advanced Janus training."""
     
-    # Load configuration
-    config_path = "config/advanced_training.yaml" # Default config path
-    # Allow overriding config path via an environment variable or simple argument if needed in future
-    # For now, sticking to the default.
-
-    loaded_config_data = {}
-    if Path(config_path).exists():
-        with open(config_path, 'r') as f:
-            loaded_config_data = yaml.safe_load(f)
+    # Load configuration using ConfigLoader
+    # Assumes advanced_training.yaml was renamed to default.yaml in config/
+    config_path = "config/default.yaml"
     
-    # Create JanusConfig instance. This will also load from environment variables.
-    # YAML values take precedence if keys overlap with environment variables.
-    config = JanusConfig(**loaded_config_data)
+    try:
+        loader = ConfigLoader(primary_config_path=config_path)
+        config = loader.load_resolved_config() # This returns a JanusConfig object
+        print(f"✓ Configuration loaded successfully from {config_path} and environment variables.")
+    except FileNotFoundError:
+        print(f"❌ Error: Configuration file {config_path} not found. Exiting.")
+        return
+    except ValueError as e: # Catch Pydantic validation errors from loader
+        print(f"❌ Error: Configuration validation failed: {e}. Exiting.")
+        return
+    except Exception as e:
+        print(f"❌ Error: An unexpected error occurred during configuration loading: {e}. Exiting.")
+        return
 
     # Create trainer
     trainer = AdvancedJanusTrainer(config)
