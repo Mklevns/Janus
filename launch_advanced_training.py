@@ -17,7 +17,8 @@ import torch
 import psutil
 from typing import Dict, Any, Optional # Added Optional for save_checkpoint
 from janus.ai_interpretability.utils.math_utils import validate_inputs, safe_import
-from config_models import JanusConfig # For type hinting
+from janus.config.models import JanusConfig # For type hinting
+from janus.config.loader import ConfigLoader # Added ConfigLoader
 
 # Optional imports with fallbacks using safe_import
 ray = safe_import("ray", "ray")
@@ -82,73 +83,83 @@ def check_system_requirements() -> Dict[str, Any]:
 
 
 @validate_inputs
-def validate_config(config_path: str) -> Dict[str, Any]:
+def validate_config(config_path: str) -> JanusConfig:
     """Validate and load configuration."""
     
-    if not Path(config_path).exists():
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
-    
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    # Validate required fields
-    required_fields = [
-        'training_mode', 'target_phenomena', 'total_timesteps',
-        'checkpoint_dir', 'results_dir'
-    ]
-    
-    for field in required_fields:
-        if field not in config:
-            raise ValueError(f"Missing required field in config: {field}")
-    
+    loader = ConfigLoader(primary_config_path=config_path)
+    janus_config_obj = loader.load_resolved_config() # Env vars already applied by loader
+
+    # Pydantic model validation handles required fields and types.
+    # Custom validation for things like mode is in JanusConfig itself.
+
     # Adjust based on system capabilities
     system_reqs = check_system_requirements()
     
-    if config.get('num_gpus', 0) > system_reqs['gpu_count']:
-        print(f"⚠️  Warning: Config requests {config['num_gpus']} GPUs but only "
-              f"{system_reqs['gpu_count']} available. Adjusting...")
-        config['num_gpus'] = system_reqs['gpu_count']
-    
-    if config.get('num_workers', 0) > system_reqs['cpu_count']:
-        print(f"⚠️  Warning: Config requests {config['num_workers']} workers but only "
-              f"{system_reqs['cpu_count']} CPUs available. Adjusting...")
-        config['num_workers'] = min(config['num_workers'], system_reqs['cpu_count'] - 2)
-    
-    return config
+    if hasattr(janus_config_obj, 'algorithm') and janus_config_obj.algorithm is not None:
+        if janus_config_obj.algorithm.num_gpus > system_reqs['gpu_count']:
+            print(f"⚠️  Warning: Config requests {janus_config_obj.algorithm.num_gpus} GPUs but only "
+                  f"{system_reqs['gpu_count']} available. Adjusting...")
+            janus_config_obj.algorithm.num_gpus = system_reqs['gpu_count']
+
+        # Ensure num_workers is at least 1 if it's set, and not more than available CPUs-2
+        # (or simply system_reqs['cpu_count'] if only 1 CPU is available in total)
+        current_num_workers = janus_config_obj.algorithm.num_workers
+        max_permissible_workers = system_reqs['cpu_count'] - 2 if system_reqs['cpu_count'] > 2 else 1
+        max_permissible_workers = max(1, max_permissible_workers) # Must be at least 1
+
+        if current_num_workers > max_permissible_workers:
+            print(f"⚠️  Warning: Config requests {current_num_workers} workers but only "
+                  f"{max_permissible_workers} permissible (based on {system_reqs['cpu_count']} CPUs). Adjusting...")
+            janus_config_obj.algorithm.num_workers = max_permissible_workers
+        elif current_num_workers <= 0: # Ensure at least 1 worker if specified (or default to 1 in model)
+            print(f"⚠️  Warning: Config requests {current_num_workers} workers. Setting to 1.")
+            janus_config_obj.algorithm.num_workers = 1
+
+
+    return janus_config_obj
 
 
 @validate_inputs
-def setup_environment(config: Dict[str, Any]):
+def setup_environment(config: JanusConfig): # Changed type hint
     """Setup directories and environment."""
     
     print("\nSetting up environment...")
     
-    # Create directories
-    for dir_key in ['checkpoint_dir', 'results_dir', 'data_dir']:
-        if dir_key in config:
-            dir_path = Path(config[dir_key])
-            dir_path.mkdir(parents=True, exist_ok=True)
-            print(f"  Created {dir_key}: {dir_path}")
-    
-    # Set environment variables
+    # Create directories (paths now come from config object's sub-models)
+    # Assuming ExperimentConfig holds these paths
+    if config.experiment:
+        for dir_path_str in [config.experiment.checkpoint_dir, config.experiment.results_dir, config.experiment.data_dir]:
+            if dir_path_str: # Check if path is not None
+                dir_path = Path(dir_path_str)
+                dir_path.mkdir(parents=True, exist_ok=True)
+                print(f"  Ensured directory exists: {dir_path}")
+
+    # Set environment variables (num_gpus from algorithm config)
+    num_gpus_to_set = 0
+    if hasattr(config, 'algorithm') and config.algorithm is not None:
+        num_gpus_to_set = config.algorithm.num_gpus
     os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(
-        str(i) for i in range(config.get('num_gpus', 0))
+        str(i) for i in range(num_gpus_to_set)
     )
     
     # Initialize Ray if needed
-    if config['training_mode'] in ['distributed', 'advanced'] and config.get('num_workers', 0) > 1:
+    # training_mode from training config, num_workers from algorithm config
+    if (hasattr(config, 'training') and config.training is not None and
+        hasattr(config, 'algorithm') and config.algorithm is not None and
+        config.training.training_mode in ['distributed', 'advanced'] and
+        config.algorithm.num_workers > 1):
         if HAS_RAY and ray and not ray.is_initialized(): # Check ray module
-            ray_config = config.get('ray_config', {})
+            ray_cfg_model = config.algorithm.ray_config # This is RayConfig Pydantic model
             
-            # Extract only valid ray.init() parameters
+            # Extract only valid ray.init() parameters from RayConfig model
             valid_ray_params = {
-                'num_cpus': ray_config.get('num_cpus', 8),
-                'num_gpus': ray_config.get('num_gpus', config.get('num_gpus', 0)),
-                'object_store_memory': ray_config.get('object_store_memory'),
-                'include_dashboard': ray_config.get('include_dashboard', False),
-                'dashboard_host': ray_config.get('dashboard_host', '127.0.0.1'),
-                '_temp_dir': ray_config.get('_temp_dir'),
-                'local_mode': ray_config.get('local_mode', False)
+                'num_cpus': ray_cfg_model.num_cpus,
+                'num_gpus': ray_cfg_model.num_gpus if ray_cfg_model.num_gpus is not None else config.algorithm.num_gpus,
+                'object_store_memory': ray_cfg_model.object_store_memory,
+                'include_dashboard': ray_cfg_model.include_dashboard,
+                'dashboard_host': ray_cfg_model.dashboard_host,
+                '_temp_dir': ray_cfg_model.temp_dir, # Uses alias _temp_dir for loading, actual attribute is temp_dir
+                'local_mode': ray_cfg_model.local_mode
             }
             
             # Remove None values
@@ -165,24 +176,26 @@ def setup_environment(config: Dict[str, Any]):
 
 
 @validate_inputs
-def launch_training(config: Dict[str, Any], resume: bool = False): # config here is the dict from YAML
+def launch_training(config: JanusConfig, resume: bool = False): # config is now JanusConfig object
     """Launch the training process."""
     
-    from integrated_pipeline import AdvancedJanusTrainer # JanusConfig already imported at top
+    from integrated_pipeline import AdvancedJanusTrainer
     
     print("\n" + "="*60)
     print("LAUNCHING JANUS ADVANCED TRAINING")
     print("="*60)
     
-    # Create trainer configuration
-    janus_config = JanusConfig(**config)
+    # config is already a JanusConfig object, no need to re-instantiate
+    janus_config = config
     
     # Create trainer
     trainer = AdvancedJanusTrainer(janus_config)
     
     # Check for resume
     if resume:
-        checkpoint_path = Path(config['checkpoint_dir']) / "latest_checkpoint.pt"
+        # checkpoint_dir from experiment config
+        checkpoint_dir = janus_config.experiment.checkpoint_dir if janus_config.experiment else "./checkpoints"
+        checkpoint_path = Path(checkpoint_dir) / "latest_checkpoint.pt"
         if checkpoint_path.exists():
             print(f"\nResuming from checkpoint: {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path)
@@ -272,11 +285,13 @@ def save_checkpoint(trainer: Any, janus_config: JanusConfig): # Type hint for tr
         'iteration': current_iteration,
         'policy_state_dict': policy_state,
         'optimizer_state_dict': optimizer_state,
-        'config': janus_config.model_dump(), # Save JanusConfig as dict
+        'config': janus_config.model_dump(mode='json'), # Save JanusConfig as dict
         'grammar_state': grammar_state
     }
     
-    checkpoint_path = Path(janus_config.checkpoint_dir) / "emergency_checkpoint.pt" # Use from JanusConfig
+    # checkpoint_dir from experiment config
+    checkpoint_dir = janus_config.experiment.checkpoint_dir if janus_config.experiment else "./checkpoints"
+    checkpoint_path = Path(checkpoint_dir) / "emergency_checkpoint.pt"
     torch.save(checkpoint, checkpoint_path)
     print(f"✓ Checkpoint saved to {checkpoint_path}")
 
@@ -294,30 +309,47 @@ def run_distributed_sweep(config_path: str, n_trials: int = 20):
     from integrated_pipeline import distributed_hyperparameter_search
     from janus.core.grammar import ProgressiveGrammar
     
-    config = validate_config(config_path)
-    setup_environment(config)
+    janus_config_obj = validate_config(config_path) # Now returns JanusConfig object
+    setup_environment(janus_config_obj) # Expects JanusConfig object
     
     grammar = ProgressiveGrammar()
     
+    env_config_params = {}
+    if hasattr(janus_config_obj, 'environment') and janus_config_obj.environment is not None:
+        env_config_params['max_depth'] = janus_config_obj.environment.max_depth
+        env_config_params['max_complexity'] = janus_config_obj.environment.max_complexity
+    else: # Fallback or raise error if essential
+        print("⚠️ Warning: Environment config not found in JanusConfig for sweep's env_config. Using defaults.")
+        env_config_params['max_depth'] = 10 # Default placeholder
+        env_config_params['max_complexity'] = 30 # Default placeholder
+
+    search_space_params = {}
+    if hasattr(janus_config_obj, 'algorithm') and janus_config_obj.algorithm is not None:
+        # Assuming hyperparam_search is a dict within algorithm.hyperparameters
+        # Or if AlgorithmConfig had `hyperparam_search: Optional[Dict[str, Any]] = None`
+        # search_space_params = janus_config_obj.algorithm.hyperparam_search or {}
+        search_space_params = janus_config_obj.algorithm.hyperparameters.get('hyperparam_search', {})
+
     # Run sweep
-    best_config = distributed_hyperparameter_search(
+    best_config_dict = distributed_hyperparameter_search( # Assuming this function returns a dict
         grammar=grammar,
-        env_config={
-            'max_depth': config['max_depth'],
-            'max_complexity': config['max_complexity']
-        },
-        search_space=config.get('hyperparam_search', {}),
+        env_config=env_config_params,
+        search_space=search_space_params,
         num_trials=n_trials
     )
     
-    print(f"\nBest configuration found:")
-    for key, value in best_config.items():
+    print(f"\nBest configuration found by sweep (dictionary):")
+    for key, value in best_config_dict.items():
         print(f"  {key}: {value}")
     
     # Save best config
-    best_config_path = Path(config['results_dir']) / "best_config.yaml"
+    results_dir_path = "./results" # Default if not found
+    if hasattr(janus_config_obj, 'experiment') and janus_config_obj.experiment is not None:
+        results_dir_path = janus_config_obj.experiment.results_dir
+
+    best_config_path = Path(results_dir_path) / "best_config_from_sweep.yaml"
     with open(best_config_path, 'w') as f:
-        yaml.dump(best_config, f)
+        yaml.dump(best_config_dict, f)
     
     print(f"\n✓ Best configuration saved to {best_config_path}")
 
@@ -379,20 +411,24 @@ def main():
     
     # Load and validate configuration
     try:
-        config_dict = validate_config(args.config) # Returns a dict
-        print(f"\n✓ Raw configuration loaded from {args.config}")
-        # Integrate command-line strict mode into the config dictionary
-        # This will be picked up by JanusConfig when it's instantiated
-        config_dict['strict_mode'] = args.strict
+        # validate_config now returns a JanusConfig object
+        loaded_janus_config = validate_config(args.config)
+        print(f"\n✓ Configuration loaded and validated from {args.config}")
 
-        # Note: JanusConfig instantiation happens inside launch_training or when creating AdvancedJanusTrainer
-        # For modes like 'sweep' or 'validate' that might not go through launch_training's JanusConfig creation,
-        # we need to be mindful of how strict_mode is passed if those paths also use ExperimentRunner.
+        # Apply CLI strict_mode override to the loaded JanusConfig object
+        if hasattr(loaded_janus_config, 'experiment') and loaded_janus_config.experiment is not None:
+            loaded_janus_config.experiment.strict_mode = args.strict
+            print(f"  Applied CLI strict_mode: {args.strict} to loaded_janus_config.experiment.strict_mode")
+        else:
+            # This case might occur if JanusConfig structure changes or experiment is None
+            print(f"⚠️ Warning: Could not set strict_mode from CLI args as 'experiment' attribute is missing or None in JanusConfig.")
 
-        print(f"  Training mode: {config_dict['training_mode']}")
-        print(f"  Target phenomena: {config_dict['target_phenomena']}")
-        print(f"  Total timesteps: {config_dict['total_timesteps']:,}")
-        print(f"  Strict mode CLI: {args.strict}")
+
+        # Print details from the JanusConfig object
+        print(f"  Training mode: {loaded_janus_config.training.training_mode if hasattr(loaded_janus_config, 'training') else 'N/A'}")
+        print(f"  Target phenomena: {loaded_janus_config.experiment.target_phenomena if hasattr(loaded_janus_config, 'experiment') else 'N/A'}")
+        print(f"  Total timesteps: {loaded_janus_config.training.total_timesteps if hasattr(loaded_janus_config, 'training') else 'N/A'}")
+        print(f"  Strict mode from config: {loaded_janus_config.experiment.strict_mode if hasattr(loaded_janus_config, 'experiment') else 'N/A'}")
         
     except Exception as e:
         print(f"\n❌ Configuration error: {e}")
@@ -401,23 +437,22 @@ def main():
     # Execute based on mode
     try:
         if args.mode == 'train':
-            # setup_environment expects a dict, config_dict is fine
-            setup_environment(config_dict)
-            # launch_training expects a dict, instantiates JanusConfig inside
-            launch_training(config_dict, resume=args.resume)
+            # setup_environment and launch_training now expect JanusConfig object
+            setup_environment(loaded_janus_config)
+            launch_training(loaded_janus_config, resume=args.resume)
             
         elif args.mode == 'sweep':
             # run_distributed_sweep expects config_path, validate_config is called inside it.
-            # We need to ensure strict_mode is passed to ExperimentRunner if it's used by sweep's internals.
-            # For now, assuming sweep doesn't directly use ExperimentRunner in a way that needs strict_mode.
-            # If it does, run_distributed_sweep would need modification.
-            print(f"⚠️  Strict mode not directly propagated to 'sweep' mode's internal ExperimentRunner instances yet.")
+            # It will need similar updates to use ConfigLoader and JanusConfig object internally.
+            # For now, this part is NOT updated as per subtask instructions.
+            print(f"⚠️  Strict mode from CLI (args.strict={args.strict}) not directly propagated to 'sweep' mode's internal ExperimentRunner instances yet.")
+            print(f"   Sweep mode will use strict_mode from its loaded YAML or its defaults.")
             run_distributed_sweep(args.config, n_trials=args.n_trials)
             
         elif args.mode == 'validate':
             from experiment_runner import run_phase1_validation, run_phase2_robustness
-            # setup_environment expects a dict
-            setup_environment(config_dict)
+            # setup_environment expects JanusConfig object
+            setup_environment(loaded_janus_config)
             
             print(f"\nRunning validation experiments (Strict mode: {args.strict})...")
             # Pass strict_mode to these validation functions

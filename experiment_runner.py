@@ -59,7 +59,8 @@ except ImportError:
 
 from sympy import lambdify, symbols
 from janus.core.expression import Expression as SymbolicExpression
-from config_models import JanusConfig, SyntheticDataParamsConfig
+from janus.config.models import JanusConfig, SyntheticDataParamsConfig, EnvironmentConfig # Added EnvironmentConfig for initialization
+from janus.config.loader import ConfigLoader # Added ConfigLoader
 from pydantic import BaseModel
 
 
@@ -463,6 +464,10 @@ class ExperimentRunner:
 def run_phase1_validation(strict_mode_override: bool = False): # Added strict_mode_override
     logging.basicConfig(level=logging.INFO)
     runner = ExperimentRunner(base_dir="./experiments_phase1", strict_mode=strict_mode_override) # Pass strict_mode
+
+    loader = ConfigLoader() # Instantiate ConfigLoader
+    base_janus_config = loader.load_resolved_config() # Load base JanusConfig
+
     configs: List[ExperimentConfig] = []
     algorithms = ['janus_full', 'genetic']
     environments = ['harmonic_oscillator', 'pendulum']
@@ -471,11 +476,44 @@ def run_phase1_validation(strict_mode_override: bool = False): # Added strict_mo
             env_specific_params_dict = {}
             if env_type_str == 'pendulum': env_specific_params_dict = {'g': 9.81, 'l': 1.0, 'm': 1.0, 'small_angle': True}
             elif env_type_str == 'harmonic_oscillator': env_specific_params_dict = {'k': 1.0, 'm': 1.0}
-            janus_cfg_instance = JanusConfig(
-                target_phenomena=env_type_str, env_specific_params=env_specific_params_dict,
-                synthetic_data_params=SyntheticDataParamsConfig(noise_level=0.0, n_samples=20, time_range=[0,10]),
-                num_evaluation_cycles=100, policy_hidden_dim=128, genetic_population_size=50,
-            )
+
+            current_janus_config = base_janus_config.model_copy(deep=True)
+            current_janus_config.mode = 'physics' # Phase 1 is physics discovery
+
+            # Update experiment-specific parts of JanusConfig
+            current_janus_config.experiment.target_phenomena = env_type_str
+            # The old JanusConfig had env_specific_params directly. New one has environment.params
+            if current_janus_config.environment is None: # Ensure environment object exists
+                current_janus_config.environment = EnvironmentConfig()
+            current_janus_config.environment.params = env_specific_params_dict
+            current_janus_config.environment.env_type = env_type_str # Also update env_type in EnvironmentConfig
+
+            # Override synthetic_data_params (assuming it's in training config)
+            if current_janus_config.training.synthetic_data_params is None:
+                current_janus_config.training.synthetic_data_params = SyntheticDataParamsConfig()
+            current_janus_config.training.synthetic_data_params.noise_level = 0.0
+            current_janus_config.training.synthetic_data_params.n_samples = 20
+            current_janus_config.training.synthetic_data_params.time_range = [0,10]
+
+            # Fields like num_evaluation_cycles, policy_hidden_dim, genetic_population_size
+            # need to map to new JanusConfig structure.
+            # num_evaluation_cycles might map to training.total_timesteps or a specific loop count.
+            # For now, let's assume total_timesteps in training_config is the equivalent or set it if appropriate.
+            # current_janus_config.training.total_timesteps = 100 * X (if num_eval_cycles * steps_per_cycle)
+            # For simplicity, if these were specific overrides for phase1, they should be set here.
+            # If JanusConfig model doesn't have direct fields, they go into algo.hyperparameters or similar.
+
+            # Example: policy_hidden_dim and genetic_population_size as algo hyperparameters
+            if algo_str == 'janus_full': # Assuming janus_full uses policy_hidden_dim
+                if current_janus_config.algorithm.hyperparameters is None: current_janus_config.algorithm.hyperparameters = {}
+                current_janus_config.algorithm.hyperparameters['policy_hidden_dim'] = 128
+            elif algo_str == 'genetic': # Assuming genetic uses genetic_population_size
+                if current_janus_config.algorithm.hyperparameters is None: current_janus_config.algorithm.hyperparameters = {}
+                current_janus_config.algorithm.hyperparameters['genetic_population_size'] = 50
+
+            # The `ExperimentConfig.from_janus_config` will use this updated current_janus_config
+            janus_cfg_instance = current_janus_config
+
             exp_config = ExperimentConfig.from_janus_config(
                 name=f"{env_type_str}_rediscovery_{algo_str}", experiment_type='physics_discovery_example',
                 janus_config=janus_cfg_instance, algorithm_name=algo_str, n_runs=2, seed=42
@@ -492,16 +530,40 @@ def run_phase1_validation(strict_mode_override: bool = False): # Added strict_mo
 def run_phase2_robustness(strict_mode_override: bool = False): # Added strict_mode_override
     logging.basicConfig(level=logging.INFO)
     runner = ExperimentRunner(base_dir="./experiments_phase2", strict_mode=strict_mode_override) # Pass strict_mode
+
+    loader = ConfigLoader() # Instantiate ConfigLoader
+    base_janus_config = loader.load_resolved_config() # Load base JanusConfig
+
     configs: List[ExperimentConfig] = []
     noise_levels_list = [0.0, 0.01, 0.05]; algorithms_list = ['janus_full', 'genetic']
     env_type_for_robustness = 'harmonic_oscillator'
+    env_specific_params_dict_robust = {'k': 1.0, 'm': 1.0}
+
     for noise_val in noise_levels_list:
         for algo_name_str in algorithms_list:
-            janus_cfg_instance_robust = JanusConfig(
-                target_phenomena=env_type_for_robustness, env_specific_params={'k': 1.0, 'm': 1.0},
-                synthetic_data_params=SyntheticDataParamsConfig(noise_level=noise_val, n_samples=20, time_range=[0,10]),
-                num_evaluation_cycles=100,
-            )
+            current_janus_config = base_janus_config.model_copy(deep=True)
+            current_janus_config.mode = 'physics'
+
+            current_janus_config.experiment.target_phenomena = env_type_for_robustness
+
+            if current_janus_config.environment is None:
+                current_janus_config.environment = EnvironmentConfig()
+            current_janus_config.environment.params = env_specific_params_dict_robust
+            current_janus_config.environment.env_type = env_type_for_robustness
+
+            if current_janus_config.training.synthetic_data_params is None:
+                current_janus_config.training.synthetic_data_params = SyntheticDataParamsConfig()
+            current_janus_config.training.synthetic_data_params.noise_level = noise_val
+            current_janus_config.training.synthetic_data_params.n_samples = 20 # As per original
+            current_janus_config.training.synthetic_data_params.time_range = [0,10] # As per original
+
+            # num_evaluation_cycles was 100. Mapping this to relevant training param if needed.
+            # e.g., current_janus_config.training.total_timesteps = 100 * X
+            # For now, specific overrides for policy_hidden_dim etc. are not in the original
+            # phase2 code snippet, so we rely on base_janus_config values for those.
+
+            janus_cfg_instance_robust = current_janus_config
+
             exp_config_robust = ExperimentConfig.from_janus_config(
                 name=f"{env_type_for_robustness}_noise_{noise_val*100:.0f}pct_{algo_name_str}",
                 experiment_type='physics_discovery_example', janus_config=janus_cfg_instance_robust,
@@ -519,17 +581,43 @@ def run_phase2_robustness(strict_mode_override: bool = False): # Added strict_mo
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s-%(levelname)s-[%(module)s:%(funcName)s:%(lineno)d]-%(message)s')
     print("ExperimentRunner __main__ Test Section"); print("="*30)
-    test_janus_config = JanusConfig(
-        target_phenomena='harmonic_oscillator', env_specific_params={'k': 1.0, 'm': 1.0},
-        synthetic_data_params=SyntheticDataParamsConfig(noise_level=0.01, n_samples=10, time_range=[0,5]),
-        num_evaluation_cycles=50, genetic_population_size=50, genetic_generations=20, max_complexity=8,
-    )
+
+    loader_main = ConfigLoader() # Use ConfigLoader
+    base_main_config = loader_main.load_resolved_config()
+
+    current_main_config = base_main_config.model_copy(deep=True)
+    current_main_config.mode = 'physics' # Default for this test
+
+    # Set experiment-specific values based on old test_janus_config
+    current_main_config.experiment.target_phenomena = 'harmonic_oscillator'
+    if current_main_config.environment is None: current_main_config.environment = EnvironmentConfig()
+    current_main_config.environment.params = {'k': 1.0, 'm': 1.0}
+    current_main_config.environment.env_type = 'harmonic_oscillator'
+    current_main_config.environment.max_complexity = 8 # from old max_complexity
+
+    if current_main_config.training.synthetic_data_params is None: current_main_config.training.synthetic_data_params = SyntheticDataParamsConfig()
+    current_main_config.training.synthetic_data_params.noise_level = 0.01
+    current_main_config.training.synthetic_data_params.n_samples = 10
+    current_main_config.training.synthetic_data_params.time_range = [0,5]
+
+    # num_evaluation_cycles=50 - map to training.total_timesteps or epochs if appropriate.
+    # e.g., current_main_config.training.total_timesteps = 50 * (some steps_per_cycle)
+    # For now, this specific override is omitted, relying on default.yaml or other training settings.
+
+    if current_main_config.algorithm.hyperparameters is None: current_main_config.algorithm.hyperparameters = {}
+    current_main_config.algorithm.hyperparameters['genetic_population_size'] = 50
+    current_main_config.algorithm.hyperparameters['genetic_generations'] = 20
+
+    test_janus_config_obj = current_main_config
+
     example_exp_config = ExperimentConfig.from_janus_config(
         name="main_test_harmonic_genetic", experiment_type='physics_discovery_example',
-        janus_config=test_janus_config, algorithm_name='genetic', n_runs=1, seed=123
+        janus_config=test_janus_config_obj, algorithm_name='genetic', n_runs=1, seed=123
     )
     main_strict_mode = os.getenv("JANUS_STRICT_MODE", "false").lower() == "true"
-    runner_main = ExperimentRunner(use_wandb=False, base_dir="./experiments_main_test", strict_mode=main_strict_mode)
+    # Pass strict_mode from the loaded config if available, or from env var as fallback
+    runner_main_strict_mode = test_janus_config_obj.experiment.strict_mode if test_janus_config_obj.experiment else main_strict_mode
+    runner_main = ExperimentRunner(use_wandb=False, base_dir="./experiments_main_test", strict_mode=runner_main_strict_mode)
     if example_exp_config.experiment_type not in runner_main.experiment_plugins:
         logging.error(f"__main__: Plugin '{example_exp_config.experiment_type}' not found. Check registration & installation.")
         logging.error(f"Available: {list(runner_main.experiment_plugins.keys())}")

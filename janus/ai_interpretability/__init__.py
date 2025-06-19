@@ -5,7 +5,7 @@ Note: This package may depend on root-level modules not yet fully integrated
 into the 'janus' package structure, such as:
 - janus.core.grammar (formerly progressive_grammar_system.py)
 - hypothesis_policy_network
-- config_models
+- janus.config.models (formerly config_models.py)
 - custom_exceptions
 - etc.
 
