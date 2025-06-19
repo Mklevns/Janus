@@ -18,7 +18,8 @@ import pickle
 from copy import deepcopy
 from functools import lru_cache
 from itertools import product, combinations_with_replacement
-from progressive_grammar_system import Expression, Variable, ProgressiveGrammar
+from janus.core.grammar import ProgressiveGrammar
+from janus.core.expression import Expression, Variable
 from optimized_candidate_generation import OptimizedCandidateGenerator
 import random
 import psutil

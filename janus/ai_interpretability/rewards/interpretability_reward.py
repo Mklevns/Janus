@@ -12,8 +12,8 @@ from sklearn.metrics import mean_squared_error
 import sympy as sp
 from typing import Any, Dict, Optional, List # Add List if not present
 
-# Assuming Expression class will be available, e.g., from progressive_grammar_system
-# from progressive_grammar_system import Expression
+# Assuming Expression class will be available, e.g., from janus.core.expression
+# from janus.core.expression import Expression
 # For now, using Any for Expression type hint if not directly importable yet
 ExpressionType = Any
 AIModelType = Any # Placeholder for AI Model type

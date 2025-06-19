@@ -16,7 +16,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import heapq
 
 # Import from your existing modules
-from progressive_grammar_system import Expression, Variable, ProgressiveGrammar
+from janus.core.grammar import ProgressiveGrammar
+from janus.core.expression import Expression, Variable
 
 
 @dataclass
@@ -436,7 +437,7 @@ def replace_generate_candidates(instance_with_grammar):
 
 
 if __name__ == "__main__":
-    from progressive_grammar_system import ProgressiveGrammar
+    from janus.core.grammar import ProgressiveGrammar
     test_grammar = ProgressiveGrammar()
     test_variables = [
         Variable("x", 0), Variable("v", 1), Variable("m", 2) # Simplified for test

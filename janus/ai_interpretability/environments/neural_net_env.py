@@ -10,11 +10,11 @@ import sympy as sp
 
 # from ..grammars.neural_grammar import NeuralGrammar # If NeuralGrammar is in grammars
 # from .base_symbolic_env import SymbolicDiscoveryEnv # If SymbolicDiscoveryEnv is moved
-# from ...core.progressive_grammar_system import Expression, Variable # If Variable is from a core module
+# from ...core.grammar import Expression, Variable # If Variable is from a core module
 
 # TEMPORARY: Using direct/potentially adjusted imports.
 # These will be fixed in the "Adjust Imports" step.
-from progressive_grammar_system import Expression, Variable
+from janus.core.expression import Expression, Variable
 from .base_symbolic_env import SymbolicDiscoveryEnv # Adjusted import
 from ..grammars.neural_grammar import NeuralGrammar
 

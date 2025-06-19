@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple, Optional, Any
 # AIBehaviorData, HypothesisNet, PPOTrainer are accessible.
 # These imports will need to be relative to their new locations.
 
-# from ...core.progressive_grammar_system import Expression # If Expression is in a core module
+# from ...core.grammar import Expression # If Expression is in a core module
 # from ..grammars.neural_grammar import NeuralGrammar
 # from ..environments.neural_net_env import AIInterpretabilityEnv, LocalInterpretabilityEnv, AIBehaviorData
 # from ...training.ppo_trainer import PPOTrainer # Assuming ppo_trainer might be structured elsewhere

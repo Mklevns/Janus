@@ -17,7 +17,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 import sympy as sp
 
 from .base_symbolic_env import SymbolicDiscoveryEnv, ObsType, InfoType
-from progressive_grammar_system import Variable, Expression
+from janus.core.expression import Variable, Expression
 
 # Type definitions
 AIModelType = Union[nn.Module, Any]  # PyTorch model or generic
@@ -429,7 +429,8 @@ class AIDiscoveryEnv(SymbolicDiscoveryEnv):
 
 # Enhanced Example Usage
 if __name__ == "__main__":
-    from progressive_grammar_system import AIGrammar, Variable
+    from janus.core.grammar import AIGrammar
+    from janus.core.expression import Variable
     import torch.nn.functional as F
     
     # 1. Create a more realistic AI Model (PyTorch)

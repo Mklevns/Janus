@@ -26,7 +26,8 @@ from collections import OrderedDict
 
 from hypothesis_policy_network import HypothesisNet, TreeEncoder, TransformerEncoder
 from janus.ai_interpretability.environments import SymbolicDiscoveryEnv
-from progressive_grammar_system import ProgressiveGrammar, Variable
+from janus.core.grammar import ProgressiveGrammar
+from janus.core.expression import Variable
 
 
 class RLlibHypothesisNet(TorchModelV2, nn.Module):

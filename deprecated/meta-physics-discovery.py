@@ -462,7 +462,7 @@ class MAMLPhysicsDiscovery:
         data = task.data_generator(1000)
         
         # Create variables
-        from progressive_grammar_system import Variable
+        from janus.core.expression import Variable
         variables = []
         for i, var_name in enumerate(task.variables[:-1]):  # Last is target
             variables.append(Variable(var_name, i, {}))
@@ -489,7 +489,7 @@ class MAMLPhysicsDiscovery:
     def _create_task_grammar(self, task: PhysicsTask):
         """Create grammar appropriate for task domain"""
         
-        from progressive_grammar_system import ProgressiveGrammar
+        from janus.core.grammar import ProgressiveGrammar
         grammar = ProgressiveGrammar()
         
         # Add domain-specific operators

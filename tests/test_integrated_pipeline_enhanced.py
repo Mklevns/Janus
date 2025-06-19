@@ -4,7 +4,8 @@ from unittest.mock import patch, MagicMock
 
 import integrated_pipeline
 from integrated_pipeline import AdvancedJanusTrainer, JanusConfig
-from progressive_grammar_system import ProgressiveGrammar, Variable
+from janus.core.grammar import ProgressiveGrammar
+from janus.core.expression import Variable
 
 class DummyEnv:
     def __init__(self, **kwargs):

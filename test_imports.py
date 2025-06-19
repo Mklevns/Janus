@@ -3,7 +3,7 @@ import sys
 import os
 
 # Add project root to PYTHONPATH to allow imports from 'janus'
-# and also to find root-level modules like progressive_grammar_system
+# and also to find root-level modules like janus.core.grammar
 # This assumes test_imports.py is run from the project root directory.
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
@@ -49,7 +49,7 @@ try:
     # For example, NeuralGrammar imports ProgressiveGrammar
     # This implicitly tests if NeuralGrammar could be initialized.
     ng = NeuralGrammar()
-    print(f"✓ Successfully initialized NeuralGrammar (tests import of root's progressive_grammar_system)")
+    print(f"✓ Successfully initialized NeuralGrammar (tests import of root's janus.core.grammar)")
 
 
     print("\n✓ All key imports successful!")

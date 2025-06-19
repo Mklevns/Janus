@@ -14,7 +14,8 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Deque, Any, Union, TypedDict # Added TypedDict
 from janus.ai_interpretability.utils.math_utils import safe_env_reset, safe_import
 from janus.ai_interpretability.environments import SymbolicDiscoveryEnv # Ensure this is imported if needed, or adjust if not.
-from progressive_grammar_system import ProgressiveGrammar, Variable # Import from correct file
+from janus.core.grammar import ProgressiveGrammar # Import from correct file
+from janus.core.expression import Variable # Import from correct file
 from dataclasses import dataclass
 import torch.optim as optim
 from collections import deque
@@ -704,7 +705,8 @@ class RolloutBuffer:
 
 if __name__ == "__main__":
     from janus.ai_interpretability.environments import SymbolicDiscoveryEnv # Keep this
-    from progressive_grammar_system import ProgressiveGrammar, Variable # Import from correct file
+    from janus.core.grammar import ProgressiveGrammar # Import from correct file
+    from janus.core.expression import Variable # Import from correct file
     grammar = ProgressiveGrammar(); variables = [Variable("x",0,{}), Variable("v",1,{})]
     data = np.column_stack([np.random.randn(100), np.random.randn(100)*2, np.random.randn(100)])
     # Ensure SymbolicDiscoveryEnv can provide 'tree_structure' in info dict from reset/step if TreeEncoder is used.
