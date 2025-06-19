@@ -1033,3 +1033,54 @@ if __name__ == "__main__":
     # Making Expression operations (like .symbolic, .complexity, validation) grammar-aware
     # is a deeper refactoring. This AIGrammar class adds the *definitions* and *policies*
     # for AI primitives.
+
+# --- AIGrammar get_arity override ---
+def ai_grammar_get_arity(self, op_name: str) -> int:
+    """
+    Returns the arity of a given operator, including AI-specific custom operators.
+    Raises ValueError if the operator is unknown.
+    """
+    # Arities for known custom AI operators
+    # These should match the definitions in AIGrammar._validate_expression or where arities are defined.
+    _ai_op_arities = {
+        'attention': 3,         # Query, Key, Value
+        'embedding_lookup': 2,  # Indices, Embedding Matrix
+        'if_then_else': 3,      # Condition, True_Branch, False_Branch
+        'threshold': 2,         # Input, Threshold_Value
+        'weighted_sum': 2,      # Weights_List, Values_List
+        'max_pool': 1           # Values_List
+        # Any other custom callable ops defined in AIGrammar.__init__ should be added here
+    }
+    if op_name in _ai_op_arities:
+        return _ai_op_arities[op_name]
+
+    # Activation functions like 'relu', 'sigmoid', etc., if treated as unary operators
+    # In AIGrammar, they are currently in 'activation_types' and might be added to 'unary_ops'
+    # by a setup step or if create_expression uses them as such.
+    # If they are in self.primitives['unary_ops'], super().get_arity will handle them.
+
+    # Fallback to ProgressiveGrammar's get_arity for standard operators
+    return super(AIGrammar, self).get_arity(op_name)
+
+AIGrammar.get_arity = ai_grammar_get_arity
+# --- End AIGrammar get_arity override ---
+
+# Methods added to ProgressiveGrammar
+ProgressiveGrammar.get_arity = lambda self, op_name: \
+    2 if op_name in self.primitives.get('binary_ops', set()) else \
+    1 if op_name in self.primitives.get('unary_ops', set()) else \
+    2 if op_name in self.primitives.get('calculus_ops', set()) else \
+    (_ for _ in ()).throw(ValueError(f"Unknown operator or function: '{op_name}' in ProgressiveGrammar"))
+
+ProgressiveGrammar.is_operator_known = lambda self, op_name: \
+    isinstance(self.get_arity(op_name), int) if hasattr(self, 'get_arity') and callable(getattr(self, 'get_arity')) else False \
+    if True else True # The if True else True is a bit of a hack to make this a one-liner lambda that can catch the ValueError
+
+# Temporary fix for is_operator_known to handle ValueError correctly in a lambda
+def _is_operator_known_impl(grammar_instance, op_name):
+    try:
+        grammar_instance.get_arity(op_name)
+        return True
+    except ValueError:
+        return False
+ProgressiveGrammar.is_operator_known = lambda self, op_name: _is_operator_known_impl(self, op_name)
