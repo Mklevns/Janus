@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, List, Tuple, Optional, Any, Callable
 from dataclasses import dataclass, field, asdict
-from math_utils import validate_inputs, safe_import
+from janus.ai_interpretability.utils.math_utils import validate_inputs, safe_import
 import json
 import pickle
 from pathlib import Path
@@ -38,7 +38,7 @@ import sys # For sys.exit
 
 from custom_exceptions import MissingDependencyError, PluginNotFoundError, InvalidConfigError, DataGenerationError
 from base_experiment import BaseExperiment
-from math_utils import calculate_symbolic_accuracy
+from janus.ai_interpretability.utils.math_utils import calculate_symbolic_accuracy
 from robust_hypothesis_extraction import HypothesisTracker, JanusTrainingIntegration
 from conservation_reward_fix import ConservationBiasedReward
 from symmetry_detection_fix import PhysicsSymmetryDetector
@@ -308,7 +308,7 @@ class ExperimentRunner:
         else: logging.info(f"Loaded plugins: {list(self.experiment_plugins.keys())}")
 
     def _register_algorithms(self):
-        from symbolic_discovery_env import SymbolicDiscoveryEnv
+        from janus.ai_interpretability.environments import SymbolicDiscoveryEnv
         from hypothesis_policy_network import HypothesisNet, PPOTrainer
         from progressive_grammar_system import ProgressiveGrammar
         from physics_discovery_extensions import SymbolicRegressor

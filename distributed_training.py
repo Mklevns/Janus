@@ -25,7 +25,7 @@ from pathlib import Path
 from collections import OrderedDict
 
 from hypothesis_policy_network import HypothesisNet, TreeEncoder, TransformerEncoder
-from symbolic_discovery_env import SymbolicDiscoveryEnv
+from janus.ai_interpretability.environments import SymbolicDiscoveryEnv
 from progressive_grammar_system import ProgressiveGrammar, Variable
 
 

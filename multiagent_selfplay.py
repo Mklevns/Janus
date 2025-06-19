@@ -16,7 +16,7 @@ import pickle
 from copy import deepcopy
 
 from hypothesis_policy_network import HypothesisNet, PPOTrainer, RolloutBuffer
-from symbolic_discovery_env import SymbolicDiscoveryEnv
+from janus.ai_interpretability.environments import SymbolicDiscoveryEnv
 
 
 @dataclass

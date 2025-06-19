@@ -103,7 +103,7 @@ class TestUtils(unittest.TestCase):
         self.assertAlmostEqual(calculate_symbolic_accuracy(str(a*b), gt_laws2), 2/3)
 
 # --- New tests for validate_inputs ---
-from math_utils import validate_inputs
+from janus.ai_interpretability.utils.math_utils import validate_inputs
 from typing import List, Dict, Tuple, Any # For type hints in test functions
 
 # Define a dummy InvalidConfigError as it was mentioned in requirements,
@@ -231,7 +231,7 @@ if __name__ == '__main__':
     unittest.main()
 
 # --- New tests for safe_import ---
-from math_utils import safe_import # safe_import is already in math_utils
+from janus.ai_interpretability.utils.math_utils import safe_import # safe_import is already in math_utils
 from unittest.mock import patch
 import io
 import math # For testing existing module import
