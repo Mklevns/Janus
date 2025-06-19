@@ -7,7 +7,8 @@ import math # For math.ceil
 # Assuming these can be imported from the project structure
 from hypothesis_policy_network import PPOTrainer, HypothesisNet
 from janus.ai_interpretability.environments import SymbolicDiscoveryEnv
-from progressive_grammar_system import ProgressiveGrammar, Variable
+from janus.core.grammar import ProgressiveGrammar
+from janus.core.expression import Variable
 
 @pytest.fixture(scope="module")
 def dummy_grammar_and_vars():

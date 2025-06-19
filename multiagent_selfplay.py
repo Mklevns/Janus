@@ -462,7 +462,8 @@ class MultiAgentPPOTrainer(PPOTrainer):
 
 # Example usage
 if __name__ == "__main__":
-    from progressive_grammar_system import ProgressiveGrammar, Variable
+    from janus.core.grammar import ProgressiveGrammar
+    from janus.core.expression import Variable
     
     # Setup
     grammar = ProgressiveGrammar()

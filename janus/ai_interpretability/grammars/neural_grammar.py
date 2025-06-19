@@ -2,20 +2,21 @@ import sympy as sp
 
 # Assuming ProgressiveGrammar, Expression, Variable are in a place accessible by this path
 # If they are part of the old root structure and not yet moved:
-# from progressive_grammar_system import ProgressiveGrammar, Expression, Variable
+# from janus.core.grammar import ProgressiveGrammar
+# from janus.core.expression import Expression, Variable
 # If they are meant to be part of janus core or a shared module:
 # from ....shared import ProgressiveGrammar, Expression, Variable
 # For now, using placeholder relative imports if they are also being moved into janus structure
-# from ...core.progressive_grammar_system import ProgressiveGrammar, Expression, Variable
-# Based on file listing, `progressive_grammar_system.py` is at the root.
+# from ...core.grammar import ProgressiveGrammar, Expression, Variable
+# Based on file listing, `grammar.py` is now in `janus/core`.
 # So, the import needs to be adjusted once its final location is decided.
 # For this refactoring, we'll assume it will be findable from the new structure.
 # A common pattern is to have a `core` or `common` module at `janus/` level.
-# Or, if `progressive_grammar_system.py` itself is moved into `janus/ai_interpretability` or a sub-module.
 
 # TEMPORARY: Using direct import assuming PYTHONPATH allows finding root modules.
-# This will need correction based on final structure of `progressive_grammar_system`.
-from progressive_grammar_system import ProgressiveGrammar, Expression, Variable
+# This will need correction based on final structure of `grammar.py`.
+from janus.core.grammar import ProgressiveGrammar
+from janus.core.expression import Expression, Variable
 
 
 class NeuralGrammar(ProgressiveGrammar):

@@ -3,7 +3,7 @@
 """
 Note: This package may depend on root-level modules not yet fully integrated
 into the 'janus' package structure, such as:
-- progressive_grammar_system
+- janus.core.grammar (formerly progressive_grammar_system.py)
 - hypothesis_policy_network
 - config_models
 - custom_exceptions

@@ -58,7 +58,7 @@ except ImportError:
         def log_discovery(self, *args, **kwargs): pass
 
 from sympy import lambdify, symbols
-from progressive_grammar_system import Expression as SymbolicExpression
+from janus.core.expression import Expression as SymbolicExpression
 from config_models import JanusConfig, SyntheticDataParamsConfig
 from pydantic import BaseModel
 
@@ -346,7 +346,7 @@ class ExperimentRunner:
     def _register_algorithms(self):
         from janus.ai_interpretability.environments import SymbolicDiscoveryEnv
         from hypothesis_policy_network import HypothesisNet, PPOTrainer
-        from progressive_grammar_system import ProgressiveGrammar
+        from janus.core.grammar import ProgressiveGrammar
         from physics_discovery_extensions import SymbolicRegressor
         def create_janus_full(env_data: np.ndarray, variables: List[Any], exp_config: ExperimentConfig) -> PPOTrainer:
             grammar = ProgressiveGrammar(); janus_cfg = exp_config.janus_config
@@ -769,8 +769,7 @@ class PhysicsDiscoveryExperiment(BaseExperiment):
 
         self.env_data = np.vstack(trajectories)
         logging.info(f"[{self.config.name}] Data shape {self.env_data.shape}.")
-        try: from progressive_grammar_system import Variable
-        except ImportError: logging.error("Failed to import 'Variable'"); raise
+        from janus.core.expression import Variable
         if self.physics_env and self.physics_env.state_vars:
             self.variables = [Variable(name, idx, {}) for idx, name in enumerate(self.physics_env.state_vars)]
         else:

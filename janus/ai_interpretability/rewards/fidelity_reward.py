@@ -4,7 +4,7 @@ import torch
 import sympy as sp
 
 # Assuming Expression and AIBehaviorData are accessible.
-# from ...core.progressive_grammar_system import Expression
+# from ...core.grammar import Expression
 # from ..environments.neural_net_env import AIBehaviorData (or a common types module)
 
 # TEMPORARY: Using direct/potentially adjusted imports or forward references.

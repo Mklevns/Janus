@@ -31,7 +31,8 @@ if not HAS_WANDB:
     print("⚠️  W&B not installed. Experiment tracking will be disabled.")
 
 # Import all custom components
-from progressive_grammar_system import ProgressiveGrammar, Variable
+from janus.core.grammar import ProgressiveGrammar
+from janus.core.expression import Variable
 from janus.ai_interpretability.environments import SymbolicDiscoveryEnv, CurriculumManager # Ensure SymbolicDiscoveryEnv is imported
 from enhanced_feedback import EnhancedSymbolicDiscoveryEnv, IntrinsicRewardCalculator, AdaptiveTrainingController
 from hypothesis_policy_network import HypothesisNet

@@ -16,7 +16,7 @@ import time
 
 from janus.ai_interpretability.environments import SymbolicDiscoveryEnv, ExpressionNode
 from hypothesis_policy_network import HypothesisNet, PPOTrainer
-from progressive_grammar_system import Expression, Variable # Added Variable
+from janus.core.expression import Expression, Variable # Added Variable
 from conservation_reward_fix import ConservationBiasedReward as NewConservationBiasedReward
 
 
@@ -965,7 +965,8 @@ class IntegratedTrainingLoop:
 
 # Example usage
 if __name__ == "__main__":
-    from progressive_grammar_system import ProgressiveGrammar, Variable
+    from janus.core.grammar import ProgressiveGrammar
+    from janus.core.expression import Variable
     
     # Setup
     grammar = ProgressiveGrammar()

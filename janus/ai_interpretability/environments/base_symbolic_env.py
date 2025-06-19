@@ -17,7 +17,8 @@ from gymnasium import spaces
 import logging
 
 if TYPE_CHECKING:
-    from progressive_grammar_system import ProgressiveGrammar, Variable, Expression as GrammarExpression
+    from janus.core.grammar import ProgressiveGrammar
+    from janus.core.expression import Variable, Expression as GrammarExpression
     from strict_mode_validator import StrictModeValidator
 
 
@@ -588,7 +589,8 @@ def _build_action_space(grammar: 'ProgressiveGrammar', variables: List['Variable
 
 
 if __name__ == "__main__":
-    from progressive_grammar_system import ProgressiveGrammar as MainGrammar, Variable as MainVariable
+    from janus.core.grammar import ProgressiveGrammar as MainGrammar
+    from janus.core.expression import Variable as MainVariable
 
     logging.basicConfig(level=logging.INFO)
 

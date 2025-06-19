@@ -292,7 +292,7 @@ def run_distributed_sweep(config_path: str, n_trials: int = 20):
     print(f"\nRunning distributed sweep with {n_trials} trials...")
     
     from integrated_pipeline import distributed_hyperparameter_search
-    from progressive_grammar_system import ProgressiveGrammar
+    from janus.core.grammar import ProgressiveGrammar
     
     config = validate_config(config_path)
     setup_environment(config)

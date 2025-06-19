@@ -4,7 +4,8 @@ import numpy as np
 # Assuming paths are set up correctly for these imports
 # Add try-except for imports if running script directly vs through test runner might be an issue
 from janus.ai_interpretability.environments import SymbolicDiscoveryEnv, ExpressionNode, NodeType
-from progressive_grammar_system import ProgressiveGrammar, Variable, Expression
+from janus.core.grammar import ProgressiveGrammar
+from janus.core.expression import Variable, Expression
 
 class MockGrammar(ProgressiveGrammar):
     def __init__(self):
@@ -566,7 +567,7 @@ if __name__ == '__main__':
 
 import pytest
 from janus.ai_interpretability.environments import TreeState # Already imported SymbolicDiscoveryEnv, ExpressionNode, NodeType
-from progressive_grammar_system import ProgressiveGrammar, Variable # Already imported ProgressiveGrammar, Variable, Expression
+# ProgressiveGrammar, Variable, Expression already imported above or will be.
 
 # It's good practice to define a fixture for the environment setup
 # if it's used across multiple tests.
@@ -819,7 +820,7 @@ def test_evaluate_expression_handles_invalid_predictions_and_exceptions(env_setu
     # The expression is x*2.0. Assume its complexity is 3.
     # The grammar and to_expression must correctly calculate complexity.
     # We need to ensure the expression object from to_expression has 'complexity'.
-    # The Expression class from progressive_grammar_system.py should provide this.
+    # The Expression class from janus.core.grammar should provide this.
 
     # Need to get the actual complexity value that ProgressiveGrammar would assign.
     # For testing, let's assume a fixed complexity for "x*2.0" if ProgressiveGrammar is complex.

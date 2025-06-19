@@ -28,7 +28,8 @@ from typing import List # Added for type hinting
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from progressive_grammar_system import ProgressiveGrammar, Variable
+from janus.core.grammar import ProgressiveGrammar
+from janus.core.expression import Variable
 from janus.ai_interpretability.environments import SymbolicDiscoveryEnv, CurriculumManager
 from hypothesis_policy_network import HypothesisNet, PPOTrainer
 from physics_discovery_extensions import SymbolicRegressor, ConservationDetector
