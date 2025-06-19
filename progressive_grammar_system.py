@@ -157,8 +157,39 @@ class Expression:
         # The __post_init__ method will correctly set complexity and symbolic form.
         return Expression(operator=self.operator, operands=cloned_operands)
 
+    def __hash__(self):
+        # Hash based on operator and a tuple of operand hashes.
+        # Operands can be Expression, Variable, or primitives.
+        # Ensure operands are hashable or convert to a hashable representation (e.g., their own hash or a string key).
 
-@dataclass
+        # For primitive types in operands (like int, float, str), their natural hash is fine.
+        # Variable class now has __hash__.
+        # Expression class (this class) will have __hash__.
+
+        # Create a tuple of hashes of operands.
+        # This relies on operands themselves being hashable if they are custom objects.
+        try:
+            operand_hashes = []
+            for op in self.operands:
+                if isinstance(op, (Expression, Variable)): # If they have __hash__
+                    operand_hashes.append(hash(op))
+                elif isinstance(op, (int, float, str, bool, type(None))): # Standard hashable primitives
+                    operand_hashes.append(hash(op))
+                else: # Fallback for other types, could use str representation or raise error
+                    operand_hashes.append(hash(str(op)))
+
+            return hash((self.operator, tuple(operand_hashes)))
+        except TypeError as e:
+            # This might happen if an operand is an unhashable list/dict directly.
+            # The Expression operands should ideally be Expression, Variable, or simple constants.
+            # A more robust version might convert unhashable operands to a string representation.
+            # For now, this relies on operands being one of the handled types.
+            # print(f"Warning: TypeError during hashing Expression: {e}. Operands: {self.operands}")
+            # Fallback hash if complex operands cause issues, this makes more expressions collide.
+            return hash(self.operator)
+
+
+@dataclass(eq=True, frozen=False) # Keep eq=True, frozen=False to allow properties to be mutable if needed
 class Variable:
     """Discovered state variable with semantic properties."""
     name: str
@@ -168,6 +199,14 @@ class Variable:
 
     def __post_init__(self):
         self.symbolic = sp.Symbol(self.name)
+
+    def __hash__(self):
+        # Hash based on name and index for uniqueness in sets/dicts for caching
+        return hash((self.name, self.index))
+
+    # __eq__ is already provided by dataclass(eq=True) based on all fields.
+    # If only name and index should define equality for caching purposes,
+    # __eq__ would also need to be custom. For now, relying on default dataclass eq.
 
     @property
     def complexity(self) -> int:
