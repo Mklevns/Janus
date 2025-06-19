@@ -23,10 +23,10 @@ from tqdm import tqdm
 import types # Ensure types is imported
 
 # Import existing Janus components
-from symbolic_discovery_env import SymbolicDiscoveryEnv
+from janus.ai_interpretability.environments import SymbolicDiscoveryEnv
 from hypothesis_policy_network import HypothesisNet, PPOTrainer
 from progressive_grammar_system import ProgressiveGrammar, Variable
-from math_utils import calculate_symbolic_accuracy, safe_env_reset # Added import
+from janus.ai_interpretability.utils.math_utils import calculate_symbolic_accuracy, safe_env_reset # Added import
 import sympy as sp
 
 # Try to import enhanced feedback if available

@@ -9,7 +9,7 @@ representations of AI model components or behaviors.
 import numpy as np
 from typing import Dict, Any, Optional
 
-from symbolic_discovery_env import SymbolicDiscoveryEnv, ObsType, InfoType # Assuming symbolic_discovery_env is in PYTHONPATH
+from .base_symbolic_env import SymbolicDiscoveryEnv, ObsType, InfoType # Adjusted import
 # from progressive_grammar_system import Variable # If needed for type hinting, though not directly used in this snippet
 
 # Placeholder for AI Model type, replace with actual model type if available

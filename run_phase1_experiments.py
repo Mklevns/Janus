@@ -29,17 +29,17 @@ from typing import List # Added for type hinting
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from progressive_grammar_system import ProgressiveGrammar, Variable
-from symbolic_discovery_env import SymbolicDiscoveryEnv, CurriculumManager
+from janus.ai_interpretability.environments import SymbolicDiscoveryEnv, CurriculumManager
 from hypothesis_policy_network import HypothesisNet, PPOTrainer
 from physics_discovery_extensions import SymbolicRegressor, ConservationDetector
 from experiment_runner import (
     ExperimentRunner, ExperimentConfig, ExperimentResult,
     HarmonicOscillatorEnv, PendulumEnv, KeplerEnv
 )
-from experiment_visualizer import ExperimentVisualizer, perform_statistical_tests
+from janus.ai_interpretability.utils.visualization import ExperimentVisualizer, perform_statistical_tests
 from utils import calculate_symbolic_accuracy, _count_operations
 from integrated_pipeline import JanusConfig, SyntheticDataParamsConfig, RewardConfig
-from math_utils import safe_env_reset # Added import
+from janus.ai_interpretability.utils.math_utils import safe_env_reset # Added import
 
 logging.basicConfig(
     level=logging.INFO,

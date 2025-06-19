@@ -11,7 +11,7 @@ import torch
 from typing import Dict, List, Optional, Tuple, Any, Type
 from pathlib import Path
 import yaml
-from math_utils import validate_inputs, safe_import
+from janus.ai_interpretability.utils.math_utils import validate_inputs, safe_import
 # from dataclasses import dataclass, field # No longer needed for JanusConfig
 import time
 from pydantic import BaseModel, Field, model_validator # BaseModel still needed for other configs
@@ -32,7 +32,7 @@ if not HAS_WANDB:
 
 # Import all custom components
 from progressive_grammar_system import ProgressiveGrammar, Variable
-from symbolic_discovery_env import SymbolicDiscoveryEnv, CurriculumManager # Ensure SymbolicDiscoveryEnv is imported
+from janus.ai_interpretability.environments import SymbolicDiscoveryEnv, CurriculumManager # Ensure SymbolicDiscoveryEnv is imported
 from enhanced_feedback import EnhancedSymbolicDiscoveryEnv, IntrinsicRewardCalculator, AdaptiveTrainingController
 from hypothesis_policy_network import HypothesisNet
 from physics_discovery_extensions import ConservationDetector, SymbolicRegressor
@@ -593,7 +593,7 @@ class AdvancedJanusTrainer:
         # Visualize results
         if phase1_results_df is not None or phase2_results_df is not None:
             try:
-                from experiment_visualizer import ExperimentVisualizer
+                from janus.ai_interpretability.utils.visualization import ExperimentVisualizer
                 visualizer = ExperimentVisualizer(results_dir=str(Path(self.config.results_dir) / "trainer_suite_viz"))
                 
                 all_validation_results = []

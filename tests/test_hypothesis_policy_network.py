@@ -6,7 +6,7 @@ import math # For math.ceil
 
 # Assuming these can be imported from the project structure
 from hypothesis_policy_network import PPOTrainer, HypothesisNet
-from symbolic_discovery_env import SymbolicDiscoveryEnv
+from janus.ai_interpretability.environments import SymbolicDiscoveryEnv
 from progressive_grammar_system import ProgressiveGrammar, Variable
 
 @pytest.fixture(scope="module")

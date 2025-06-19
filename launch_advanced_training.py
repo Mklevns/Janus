@@ -16,7 +16,7 @@ import yaml
 import torch
 import psutil
 from typing import Dict, Any, Optional # Added Optional for save_checkpoint
-from math_utils import validate_inputs, safe_import
+from janus.ai_interpretability.utils.math_utils import validate_inputs, safe_import
 from config_models import JanusConfig # For type hinting
 
 # Optional imports with fallbacks using safe_import
