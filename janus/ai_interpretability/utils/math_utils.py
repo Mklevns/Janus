@@ -93,6 +93,8 @@ def validate_inputs(func):
 
 import importlib
 from typing import Optional, Any
+import torch
+import numpy as np
 
 def safe_import(module_name: str, pip_install_name: Optional[str] = None, alias: Optional[str] = None) -> Optional[Any]:
     """
@@ -334,3 +336,27 @@ if __name__ == '__main__':
 
 
     print("\nAll local tests for math_utils.py complete (pending execution).")
+
+
+def self_attention_primitive(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Implements self-attention mechanism for transformer models.
+    """
+    hidden_dim = query.shape[-1]
+    scores = torch.matmul(query, key.transpose(-2, -1)) / np.sqrt(hidden_dim)
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, -1e9)
+    attention_weights = torch.softmax(scores, dim=-1)
+    output = torch.matmul(attention_weights, value)
+    return output
+
+def position_encoding_primitive(seq_len: int, hidden_dim: int, max_len: int = 5000) -> torch.Tensor:
+    """
+    Generate sinusoidal position encodings.
+    """
+    position = torch.arange(seq_len).unsqueeze(1).float()
+    div_term = torch.exp(torch.arange(0, hidden_dim, 2).float() * -(np.log(10000.0) / hidden_dim))
+    pos_encoding = torch.zeros(seq_len, hidden_dim)
+    pos_encoding[:, 0::2] = torch.sin(position * div_term)
+    pos_encoding[:, 1::2] = torch.cos(position * div_term)
+    return pos_encoding
