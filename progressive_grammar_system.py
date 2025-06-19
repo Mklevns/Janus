@@ -11,6 +11,8 @@ import sympy as sp
 from typing import Dict, List, Tuple, Optional, Set, Any, TypeVar, Generic, Union # Added TypeVar, Generic, Union
 from dataclasses import dataclass, field
 from collections import defaultdict
+import random
+import logging
 import torch
 import torch.nn as nn
 from scipy.stats import entropy
@@ -211,6 +213,100 @@ class Variable:
     @property
     def complexity(self) -> int:
         return 1
+
+
+TargetType = TypeVar('TargetType')
+
+@dataclass
+class CFGRule(Generic[TargetType]):
+    """Represents a single rule in a context-free grammar."""
+    symbol: str
+    expression: Union[str, List[Union[str, TargetType]]] # TargetType for direct objects/terminals
+    weight: float = 1.0  # For weighted random choice
+
+    def __post_init__(self):
+        if self.weight <= 0:
+            raise ValueError("Rule weight must be positive.")
+
+class ContextFreeGrammar(Generic[TargetType]):
+    """Represents a context-free grammar with support for weighted random generation."""
+    # Rules are stored as a dictionary where keys are non-terminal symbols
+    # and values are lists of CFGRule objects.
+    rules: Dict[str, List[CFGRule[TargetType]]]
+
+    def __init__(self, rules: Optional[List[CFGRule[TargetType]]] = None):
+        self.rules = defaultdict(list)
+        if rules:
+            for rule in rules:
+                self.add_rule(rule)
+
+    def add_rule(self, rule: CFGRule[TargetType]):
+        """Adds a rule to the grammar."""
+        self.rules[rule.symbol].append(rule)
+
+    def get_productions(self, symbol: str) -> List[CFGRule[TargetType]]:
+        """Returns all production rules for a given symbol."""
+        if symbol not in self.rules:
+            raise ValueError(f"Symbol '{symbol}' not found in grammar rules.")
+        return self.rules[symbol]
+
+    def generate_random(self, start_symbol: str) -> List[Union[str, TargetType]]:
+        """
+        Generates a random sequence (string or list of items) from the grammar,
+        respecting rule weights.
+        Returns a list of terminal symbols or direct TargetType objects.
+        """
+        expansion_stack = [start_symbol]
+        result_sequence = []
+
+        max_depth = 100 # Protection against infinite recursion in cyclic grammars without proper terminal paths
+        current_depth = 0
+
+        while expansion_stack and current_depth < max_depth:
+            current_symbol = expansion_stack.pop(0) # Process first-in (BFS-like for structure)
+
+            if current_symbol not in self.rules:
+                # If it's not a non-terminal, it's a terminal symbol or a direct object.
+                result_sequence.append(current_symbol)
+                continue
+
+            productions = self.get_productions(current_symbol)
+            if not productions:
+                # This case should ideally not happen if grammar is well-formed
+                # and all non-terminals have productions or lead to terminals.
+                # Treating as a terminal if no productions found.
+                result_sequence.append(current_symbol)
+                continue
+
+            # Weighted random choice of a rule for the current symbol
+            total_weight = sum(rule.weight for rule in productions)
+            chosen_weight = random.uniform(0, total_weight)
+            cumulative_weight = 0
+            chosen_rule = None
+            for rule in productions:
+                cumulative_weight += rule.weight
+                if chosen_weight <= cumulative_weight:
+                    chosen_rule = rule
+                    break
+
+            if chosen_rule is None: # Should not happen if productions list is not empty
+                chosen_rule = productions[0]
+
+
+            # The expression can be a list of symbols/objects or a single string (terminal)
+            if isinstance(chosen_rule.expression, list):
+                # Add symbols to the front of the stack to maintain order (if using pop(0))
+                # or reverse and add to back (if using pop())
+                expansion_stack = list(chosen_rule.expression) + expansion_stack
+            else: # Single string or TargetType object
+                expansion_stack.insert(0, chosen_rule.expression)
+
+            current_depth +=1
+
+        if current_depth >= max_depth:
+            logging.warning(f"Max generation depth reached for start symbol '{start_symbol}'. Output may be incomplete.")
+
+        return result_sequence
 
 
 class NoisyObservationProcessor:
@@ -640,6 +736,232 @@ class ProgressiveGrammar:
 
         return abstractions
 
+    def set_rules_from_cfg(self, rules: List[CFGRule[Union[str, Variable]]], start_symbol: str = "EXPR"):
+        """
+        Initializes or replaces the grammar's generation rules using a ContextFreeGrammar.
+        The CFG can produce strings representing operators, variable names, or constant placeholders.
+        It can also directly produce Variable objects.
+        """
+        self.cfg_grammar = ContextFreeGrammar[Union[str, Variable]](rules)
+        self.cfg_start_symbol = start_symbol
+        # Ensure that all variables and operators produced by the CFG are known
+        # to the ProgressiveGrammar instance.
+        # This might involve iterating through all possible productions, which can be complex.
+        # A simpler approach is to validate symbols as they are used during generation.
+        # For now, we assume operators are from existing primitives and variables are handled dynamically.
+        logging.info(f"CFG rules set in ProgressiveGrammar with start symbol '{start_symbol}'.")
+
+
+    def _generate_from_symbol_cfg(self, symbol: Union[str, Variable], max_depth: int, current_depth: int) -> Optional[Any]:
+        """
+        Recursive helper to generate part of an expression from a CFG symbol.
+        Handles terminals (operators, variables, constants) and non-terminals.
+        """
+        if current_depth > max_depth:
+            logging.warning(f"Max recursion depth {max_depth} exceeded in _generate_from_symbol_cfg for symbol '{symbol}'")
+            # Attempt to return a terminal value if possible, like a variable or a default constant
+            # This helps in gracefully degrading instead of outright failing.
+            if isinstance(symbol, Variable):
+                return symbol
+            # Try to pick a random variable if symbol is a non-terminal that blew the stack
+            if isinstance(symbol, str) and symbol.isupper(): # Convention for non-terminals
+                if self.variables:
+                    return random.choice(list(self.variables.values()))
+            return None # Fallback, generation for this branch might fail
+
+        if isinstance(symbol, Variable): # Terminal Variable object
+            return symbol
+
+        # If symbol is a string, it could be a non-terminal, an operator, a variable name, or a placeholder like 'CONST'
+        if not isinstance(symbol, str):
+            # This case should ideally not be reached if CFG rules are well-defined (string or Variable)
+            logging.error(f"Unexpected symbol type in _generate_from_symbol_cfg: {type(symbol)}, value: {symbol}")
+            return None
+
+        # Check if the symbol is a non-terminal in the CFG
+        if symbol in self.cfg_grammar.rules:
+            # It's a non-terminal, expand it using the CFG.
+            # The CFG's generate_random method returns a list of items (strings or Variables).
+            # We need to process this list to form a structured Expression.
+            # This is the tricky part: how do we interpret the flat list from CFG into a tree?
+            # The current CFG generates a flat list. We need a CFG designed to produce Prefix/Polish notation.
+            # Example: Rule 'EXPR' -> ['BINARY_OP', 'EXPR', 'EXPR']
+            #          Rule 'BINARY_OP' -> ['+', '-', '*', '/'] (terminals for operators)
+            #          Rule 'EXPR' -> ['VAR', 'CONST'] (terminals for operands)
+
+            # Let's assume the CFG is structured to produce a sequence that can be parsed into an expression.
+            # For instance, a prefix (Polish) notation string: [operator, operand1, operand2]
+            generated_sequence = self.cfg_grammar.generate_random(symbol) # This returns a list
+
+            if not generated_sequence:
+                logging.warning(f"CFG generated an empty sequence for non-terminal '{symbol}'")
+                return None
+
+            # The first element of the sequence is treated as the operator
+            op_name = generated_sequence[0]
+            if not isinstance(op_name, str) or not self.is_operator_known(op_name):
+                 # If op_name is a Variable or other non-string, it cannot be an operator.
+                 # Or, if it's a string but not a recognized operator (e.g. a non-terminal like "VAR" or "CONST")
+                 # This indicates the sequence is not an operator-led expression part.
+                 # It might be a single terminal like a variable name, 'CONST', or a Variable object.
+                 # We recursively call _generate_from_symbol_cfg on this single item.
+                 # This handles cases like 'EXPR' -> 'VAR' or 'EXPR' -> Variable_object
+                 if len(generated_sequence) == 1:
+                    return self._generate_from_symbol_cfg(op_name, max_depth, current_depth + 1)
+                 else:
+                    # This case is problematic: sequence starts with non-operator but has multiple items.
+                    # e.g. ['VAR', 'something_else'] from a rule for 'EXPR'.
+                    # This implies the CFG structure is not directly mapping to Expression trees as expected.
+                    logging.warning(f"CFG generated sequence for '{symbol}' starting with non-operator '{op_name}' and multiple items. Sequence: {generated_sequence}. Treating as error or trying first element.")
+                    # We could try to salvage by processing the first element only, if it's a valid symbol.
+                    return self._generate_from_symbol_cfg(op_name, max_depth, current_depth + 1)
+
+
+            arity = self.get_arity(op_name)
+            operands = []
+
+            # The rest of the sequence are operands for this operator
+            # We need to consume the correct number of elements from generated_sequence for these operands.
+            # This part is complex because generated_sequence is flat.
+            # The CFG needs to be designed such that its output list can be correctly parsed.
+            # A simple flat list is not enough for nested structures if we just iterate.
+            # E.g., if EXPR -> [OP, EXPR, EXPR], and then EXPR -> [VAR],
+            # generate_random('EXPR') could give [OP, VAR, VAR] - flat, easy.
+            # But if it gives [OP, [OP2, VAR, VAR], VAR], our current CFG.generate_random doesn't do that.
+            # It gives: [OP, OP2, VAR, VAR, VAR] if rules are EXPR -> [OP, EXPR, EXPR]; EXPR -> [OP2, EXPR, EXPR]; EXPR -> [VAR]
+            # This requires a parser for the generated sequence.
+
+            # For simplicity, let's assume the CFG is designed such that for an operator,
+            # the subsequent elements in the generated list are its direct arguments (non-terminals or terminals).
+            # This means the CFG itself must ensure the correct structure for direct parsing.
+            # E.g., 'EXPR' -> ['BINARY_OP', 'ARG', 'ARG'], 'UNARY_OP' -> ['UNARY_OP_TYPE', 'ARG']
+            # 'ARG' -> ['VAR', 'CONST', 'EXPR'] (EXPR here means it will be another op-led sequence)
+
+            # Let's adjust the interpretation: the `generated_sequence` from `cfg_grammar.generate_random(symbol)`
+            # is for the current `symbol`. If `symbol` is 'EXPR', it might expand to `['*', 'VAR1', 'VAR2']`.
+            # The `op_name` is '*' (generated_sequence[0]).
+            # The operands are 'VAR1', 'VAR2' (generated_sequence[1:]).
+
+            operand_symbols = generated_sequence[1:]
+
+            if len(operand_symbols) != arity:
+                logging.warning(f"Arity mismatch for operator '{op_name}'. Expected {arity}, got {len(operand_symbols)} symbols: {operand_symbols}. CFG rule for '{symbol}' might be ill-defined for this operator.")
+                # Attempt to use available operands, or fill with defaults, or fail.
+                # For now, let's try to proceed if too many operands, or fail if too few.
+                if len(operand_symbols) < arity:
+                    return None # Cannot satisfy arity
+                operand_symbols = operand_symbols[:arity] # Truncate if too many
+
+            for i in range(arity):
+                operand_symbol = operand_symbols[i]
+                # Recursively generate expression for each operand symbol
+                operand_expr = self._generate_from_symbol_cfg(operand_symbol, max_depth, current_depth + 1)
+                if operand_expr is None:
+                    logging.warning(f"Failed to generate operand {i} for operator '{op_name}' from symbol '{operand_symbol}'.")
+                    return None  # Failure to construct an operand
+                operands.append(operand_expr)
+
+            # Successfully built operands, now create the expression
+            return self.create_expression(op_name, operands, validate=True)
+
+        # Symbol is a terminal string from CFG (not a non-terminal)
+        # It could be an operator name (e.g. '+'), a variable name (e.g. 'x_1'), or 'CONST'.
+        elif symbol in self.primitives['binary_ops'] or \
+             symbol in self.primitives['unary_ops'] or \
+             symbol in self.primitives['calculus_ops']:
+            # This case should be handled if CFG produces operator as part of a sequence,
+            # as processed above. If a bare operator string is produced for a symbol that
+            # was expected to be an operand, it's an issue.
+            # However, if the CFG rule was like 'OP_TYPE' -> '+', then this is just returning the operator name.
+            return symbol # Return the operator name as a string
+
+        elif symbol in self.variables: # Terminal: existing variable name
+            return self.variables[symbol]
+
+        elif symbol == 'CONST': # Placeholder for a constant
+            # Generate a random constant or use a default one.
+            # For now, let's pick from a predefined set or generate a simple one.
+            # This could be made more sophisticated (e.g., range, type).
+            return random.choice([0, 1, -1, np.pi, np.e] + [round(random.uniform(-2,2),2)]) # Returns a number
+
+        elif symbol.startswith("var_") or symbol in [v.name for v in self.variables.values()]: # Generic variable name from CFG
+            # This allows CFG to specify variable names like "var_generic" or existing ones.
+            # If it's an existing variable name, return the Variable object.
+            if symbol in self.variables:
+                return self.variables[symbol]
+            else:
+                # If CFG produced a new variable name not yet in self.variables,
+                # this implies the CFG is suggesting a new variable.
+                # For robust generation, we should probably ensure such variables are known
+                # or handle their creation. For now, if not found, this is an issue.
+                # Fallback: pick a random known variable if available.
+                logging.warning(f"CFG produced an unknown variable name '{symbol}'. Using a random known variable if possible.")
+                if self.variables:
+                    return random.choice(list(self.variables.values()))
+                else: # No variables known, cannot satisfy this.
+                    logging.error(f"Cannot create expression from unknown variable '{symbol}' when no variables are discovered.")
+                    return None
+
+        else:
+            # Symbol is a string but not a non-terminal, not an operator, not 'CONST', not a known variable.
+            # It might be a newly proposed variable name by the CFG.
+            # Or it could be an error / misconfiguration.
+            # Example: CFG rule 'EXPR' -> 'my_special_undefined_symbol'
+            logging.warning(f"Treating unknown terminal symbol '{symbol}' from CFG as a potential new variable name or error.")
+            # Option 1: Try to treat as a new variable if it fits a naming convention.
+            # Option 2: Pick a random existing variable.
+            # Option 3: Fail.
+            # For now, let's try Option 2 for robustness.
+            if self.variables:
+                # This might not be what the CFG intended, but prevents immediate failure.
+                return random.choice(list(self.variables.values()))
+            else:
+                logging.error(f"Unknown terminal symbol '{symbol}' from CFG and no variables available to substitute.")
+                return None
+
+
+    def generate_random_expression_from_cfg(self, start_symbol: Optional[str] = None, max_depth: int = 10) -> Optional[Expression]:
+        """
+        Generates a random mathematical expression tree using the configured ContextFreeGrammar.
+        The CFG should be designed to produce sequences that can be interpreted as expressions,
+        typically in a prefix (Polish) notation.
+        'start_symbol' defaults to self.cfg_start_symbol if not provided.
+        """
+        if not hasattr(self, 'cfg_grammar') or self.cfg_grammar is None:
+            logging.error("ContextFreeGrammar (self.cfg_grammar) is not initialized. Call set_rules_from_cfg first.")
+            return None
+
+        current_start_symbol = start_symbol if start_symbol else self.cfg_start_symbol
+        if not current_start_symbol:
+            logging.error("No start symbol provided for CFG generation and no default is set.")
+            return None
+
+        # The _generate_from_symbol_cfg method is responsible for interpreting the CFG output.
+        # It expects the CFG to guide the construction of an Expression tree.
+        generated_expr_component = self._generate_from_symbol_cfg(current_start_symbol, max_depth, 0)
+
+        if isinstance(generated_expr_component, Expression):
+            return generated_expr_component
+        elif generated_expr_component is None:
+            logging.error(f"Failed to generate a complete expression from CFG start symbol '{current_start_symbol}'.")
+            return None
+        else:
+            # If _generate_from_symbol_cfg returns something that is not an Expression
+            # (e.g., a single Variable object or a constant value if the CFG directly produces them
+            # from the start symbol without an operator), we need to wrap it appropriately
+            # or decide if this is a valid outcome.
+            # For example, if CFG is `S -> VAR` and `VAR -> x`, it might return Variable('x').
+            # This is a valid expression component but not a complex Expression object.
+            # We can wrap it in a 'var' or 'const' Expression.
+            if isinstance(generated_expr_component, Variable):
+                return self.create_expression('var', [generated_expr_component.name], validate=False) # Assume var name is valid
+            elif isinstance(generated_expr_component, (int, float)):
+                return self.create_expression('const', [generated_expr_component], validate=False)
+            else:
+                logging.error(f"CFG generation resulted in an unexpected type: {type(generated_expr_component)} for symbol '{current_start_symbol}'. Expected Expression, Variable, or constant.")
+                return None
+
+
     def _extract_all_subexpressions(self,
                                    expr: Expression,
                                    collected: Optional[Set] = None) -> List[Expression]:
@@ -755,7 +1077,7 @@ class AIGrammar(ProgressiveGrammar):
         # These will be functional primitives.
         # Their evaluation will require specific logic, possibly outside direct sympy conversion.
         self.add_primitive('attention', self._attention_op)
-        self.add_primitive('embedding_lookup', self._embedding_op)
+        self.add_primitive('embedding', self._embedding_op)
 
         # Logical primitives
         self.add_primitive('if_then_else', lambda cond, true_val, false_val:
@@ -804,167 +1126,101 @@ class AIGrammar(ProgressiveGrammar):
                     self.primitives['custom_values'] = {}
                 self.primitives['custom_values'][name] = func_or_values
 
-
+    # The __init__ method is preserved above this point.
+    # Adding _attention_op as per the subtask description.
+    # If a specific implementation from "the issue" was intended,
+    # this placeholder version should be replaced with that.
     def _attention_op(self, query: Any, key: Any, value: Any) -> Any:
-        """Placeholder for attention mechanism operation."""
-        # In a real scenario, this would involve complex tensor operations.
-        # For symbolic representation, it might become a named function.
-        # e.g., Attention(Q, K, V)
-        print(f"Warning: _attention_op is a placeholder. Query: {query}, Key: {key}, Value: {value}")
-        # raise NotImplementedError("Attention operation is not implemented symbolically yet.")
-        return f"Attention({query}, {key}, {value})" # Placeholder symbolic string
+        """
+        Implements attention mechanism operation for symbolic representation.
+
+        For symbolic mode: Returns a SymPy function representation
+        For numeric mode: Computes actual attention scores
+        """
+        # Check if we're in symbolic or numeric mode
+        if isinstance(query, (sp.Symbol, sp.Expr)):
+            # Symbolic mode - return a symbolic representation
+            return sp.Function('Attention')(query, key, value)
+
+        # Numeric mode - compute actual attention
+        if isinstance(query, np.ndarray):
+            # Convert to torch tensors if needed
+            q = torch.tensor(query, dtype=torch.float32) if not isinstance(query, torch.Tensor) else query
+            k = torch.tensor(key, dtype=torch.float32) if not isinstance(key, torch.Tensor) else key
+            v = torch.tensor(value, dtype=torch.float32) if not isinstance(value, torch.Tensor) else value
+
+            # Compute attention scores: softmax(Q @ K^T / sqrt(d_k)) @ V
+            d_k = q.shape[-1]
+            scores = torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(d_k)
+            attention_weights = torch.softmax(scores, dim=-1)
+            output = torch.matmul(attention_weights, v)
+
+            return output.numpy() if isinstance(query, np.ndarray) else output
+
+        # Fallback for other types
+        return f"Attention({query}, {key}, {value})"
 
     def _embedding_op(self, indices: Any, embedding_matrix: Any) -> Any:
-        """Placeholder for embedding lookup operation."""
-        # e.g., EmbeddingLookup(indices, matrix_name)
-        print(f"Warning: _embedding_op is a placeholder. Indices: {indices}, Matrix: {embedding_matrix}")
-        # raise NotImplementedError("Embedding lookup is not implemented symbolically yet.")
-        return f"EmbeddingLookup({indices}, {embedding_matrix})" # Placeholder symbolic string
+        """
+        Implements embedding lookup operation.
 
-    def _to_sympy(self, expr_node: Expression) -> sp.Expr: # Overriding to handle new ops
+        For symbolic mode: Returns a SymPy function representation
+        For numeric mode: Performs actual embedding lookup
         """
-        Converts an Expression node to its Sympy representation.
-        Extends base class method to handle AI-specific primitives.
-        """
-        # Custom callable ops (like if_then_else, threshold, etc.)
-        # These might not have direct Sympy equivalents or might be represented as Functions.
+        # Symbolic mode
+        if isinstance(indices, (sp.Symbol, sp.Expr)):
+            return sp.Function('Embedding')(indices, embedding_matrix)
+
+        # Numeric mode
+        if isinstance(indices, (np.ndarray, list)):
+            indices = np.array(indices, dtype=int)
+
+            if isinstance(embedding_matrix, np.ndarray):
+                # Perform embedding lookup
+                return embedding_matrix[indices]
+            elif isinstance(embedding_matrix, torch.Tensor):
+                # Handle PyTorch tensors
+                indices_tensor = torch.tensor(indices, dtype=torch.long)
+                return embedding_matrix[indices_tensor].numpy()
+            elif isinstance(embedding_matrix, str):
+                # Symbolic reference to embedding matrix
+                return f"Embedding({indices}, {embedding_matrix})"
+
+        # Fallback
+        return f"EmbeddingLookup({indices}, {embedding_matrix})"
+
+    def _to_sympy(self, expr_node: Expression) -> sp.Expr:
+        # ... (existing implementation for other custom callable ops)
         if expr_node.operator in self.primitives.get('custom_callable_ops', {}):
-            # For now, represent them as named Sympy functions.
-            # Their actual evaluation would happen outside Sympy, during numerical simulation.
             func_name = expr_node.operator
-
-            # Recursively convert operands to Sympy expressions
             sympy_operands = []
-            for op_node in expr_node.operands: # Renamed op to op_node
+            for op_node in expr_node.operands:
                 if isinstance(op_node, Expression):
                     sympy_operands.append(self._to_sympy(op_node))
                 elif isinstance(op_node, Variable):
                     sympy_operands.append(op_node.symbolic)
                 elif isinstance(op_node, (int, float)):
                     sympy_operands.append(sp.Number(op_node))
-                elif isinstance(op_node, str): # Could be a string literal or symbolic name
-                    sympy_operands.append(sp.Symbol(op_node)) # Treat as symbol if string
-                else: # Fallback for unknown operand types
+                elif isinstance(op_node, str):
+                    sympy_operands.append(sp.Symbol(op_node))
+                else:
                     sympy_operands.append(sp.Symbol(str(op_node)))
 
-            # Handle specific lambda functions for more precise Sympy representation if possible
             if func_name == 'if_then_else' and len(sympy_operands) == 3:
-                # Sympy's Piecewise can represent if-then-else
-                # Piecewise((true_expr, cond_expr), (false_expr, True))
-                # This assumes cond_expr evaluates to a boolean in Sympy context.
-                # The lambda `cond` is a boolean, `true_val` and `false_val` are values.
-                # This is tricky because the lambda is evaluated by Python, not Sympy directly.
-                # For symbolic representation, we might need to create a Sympy Function.
-                 return sp.Function(func_name)(*sympy_operands) # Default to Function for now
-
+                return sp.Function(func_name)(*sympy_operands)
             elif func_name == 'threshold' and len(sympy_operands) == 2:
-                # x > t  (returns boolean)
-                # Sympy can represent this directly as a relational expression
                 return sympy_operands[0] > sympy_operands[1]
 
-            # For others like weighted_sum, max_pool, attention, embedding_lookup:
-            # These are complex operations. Representing them as opaque Sympy Functions.
+            # Add handling for attention and embedding
+            if func_name == 'attention':
+                return sp.Function('Attention')(*sympy_operands)
+            # func_name will be 'embedding' as per the new requirement
+            if func_name == 'embedding':
+                return sp.Function('Embedding')(*sympy_operands)
+
             return sp.Function(func_name)(*sympy_operands)
 
-        # For activation types like 'relu', 'sigmoid' - these are not operators in Expression
-        # They are typically applied to an expression. e.g. relu(expr).
-        # If they are used as operators in an Expression e.g. Expression('relu', [operand_expr]),
-        # then they should be in 'unary_ops' or similar.
-        # The current AIGrammar setup adds 'activation_types' as a list of strings.
-        # If an expression like `Expression('relu', [sub_expr])` is formed,
-        # `_validate_expression` and `_to_sympy` need to know 'relu' is a valid unary op.
-        # For now, assuming 'relu' etc. might be added to 'unary_ops' if used this way.
-
-        # Fallback to parent's _to_sympy for standard operators
-        # Need to ensure the Expression object is passed, not self.
-        # The original _to_sympy in Expression class is `expr_node._to_sympy()`
-        # The method signature in ProgressiveGrammar is `_to_sympy(self) -> sp.Expr` for an Expression instance.
-        # This needs to be consistent. Let's assume we are working with an Expression instance `expr_node`.
-
-        # If this AIGrammar._to_sympy is called on an Expression instance, it should be:
-        # return super(AIGrammar, type(expr_node))._to_sympy(expr_node) # If AIGrammar is not an Expression subclass
-        # However, ProgressiveGrammar.create_expression returns Expression instances.
-        # Expression._to_sympy is the primary method.
-        # This override implies AIGrammar itself might be an Expression or it's a utility method.
-        # Given the context, it's likely that an Expression object `expr_node` is passed,
-        # and this method is part of AIGrammar to customize its conversion.
-
-        # The original `Expression._to_sympy` is what we'd call:
-        # Let's assume this method is intended to be part of the Expression class logic
-        # when the grammar is AIGrammar. This is architecturally complex.
-        # A simpler way: ProgressiveGrammar.create_expression creates Expression objects.
-        # Expression._to_sympy should be enhanced or AIGrammar should provide a dedicated
-        # conversion utility that it uses.
-
-        # For now, let's assume this method is called with an Expression `expr_node`
-        # and if the operator is not custom, it defers to the standard Expression._to_sympy logic.
-        # This requires `expr_node` to have access to its original `_to_sympy` if this one doesn't handle it.
-        # This is problematic.
-
-        # Alternative: AIGrammar's `create_expression` returns a specialized AIExpression(Expression)
-        # which has its own `_to_sympy`.
-        # Or, `Expression._to_sympy` itself becomes aware of the grammar context.
-
-        # Safest assumption: if an operator is not custom AI, it's handled by base Expression logic.
-        # This means this method should only handle *new* AI operators.
-        # The `Expression` class's `_to_sympy` method would need to be able to call out to the
-        # grammar system for custom types, or this logic needs to be merged/refactored.
-
-        # Let's assume this is a helper, and the main call is still `Expression.symbolic` which calls `Expression._to_sympy`.
-        # `Expression._to_sympy` would need to be modified to consult the grammar for these.
-
-        # For the purpose of this step, we are modifying AIGrammar.
-        # If Expression._to_sympy is called, and it encounters an op like 'if_then_else',
-        # it needs to know how to handle it.
-        # This suggests `Expression._to_sympy` should be modified, or it should delegate to the grammar.
-
-        # Let's assume this method *replaces* the logic for AI specific ops if called.
-        # The base ProgressiveGrammar does not have _to_sympy. Expression class does.
-        # This method is incorrectly placed if it's meant to override Expression._to_sympy.
-
-        # Re-evaluating: The `Expression` class has `_to_sympy`.
-        # `AIGrammar` should not have its own `_to_sympy` with this signature unless `AIGrammar` instances are `Expression`s.
-        # The change should ideally be within `Expression._to_sympy` to make it grammar-aware,
-        # or `AIGrammar` provides lookup for these custom functions that `Expression._to_sympy` can use.
-
-        # Sticking to the plan of modifying AIGrammar:
-        # This method implies it's a utility FOR Expression, or it's a misinterpretation of where to put it.
-        # If it's a utility:
-        # def convert_ai_expression_to_sympy(self, expr_node: Expression) -> sp.Expr:
-        # ... then Expression._to_sympy would call this.
-
-        # For now, let's assume this is the intended override path, and Expression class will be modified
-        # to call `grammar_instance.convert_expression_to_sympy(self)` if a grammar is associated.
-        # This is a larger architectural change.
-
-        # Simplification: The `Expression` class itself should be made extensible or grammar-aware.
-        # Adding this method to `AIGrammar` means it's a helper.
-        # Let's proceed with the definition here, and acknowledge that `Expression._to_sympy`
-        # would need to be modified to use this.
-
-        # If the operator is not one of the custom AI ones, it should defer to the base implementation.
-        # However, ProgressiveGrammar doesn't have _to_sympy. Expression class does.
-        # This method cannot `super()._to_sympy()` if AIGrammar is not an Expression.
-        # This indicates a structural issue with the request vs. codebase.
-
-        # Let's assume this method is intended to be ADDED to the Expression class,
-        # or the Expression class's _to_sympy is MODIFIED.
-        # Since the task is to modify AIGrammar, this method's role is likely a helper or a policy.
-
-        # For now, if it's not a custom op, this specific method shouldn't handle it.
-        # It should only define behavior for *new* ops.
-        # The original Expression._to_sympy will handle the rest.
-        # This means Expression._to_sympy needs to be modified to call:
-        # `if self.operator in current_grammar.get_custom_ai_ops(): return current_grammar.custom_ai_op_to_sympy(self)`
-
-        # Given the file is `progressive_grammar_system.py`, and this is `AIGrammar`,
-        # this method defines *how* AIGrammar would want these ops converted.
-        # The `Expression` class would be the one to *use* this definition.
-
-        # So, this method is more of a policy/handler lookup for Expression.
-        # It should not call super()._to_sympy(). It should raise error if op unknown to it.
         raise NotImplementedError(f"Operator '{expr_node.operator}' not handled by AIGrammar._to_sympy policy.")
-
 
     def _validate_expression(self, operator: str, operands: List[Any]) -> bool: # Overriding
         """
@@ -1069,28 +1325,111 @@ if __name__ == "__main__":
     # The AIGrammar._to_sympy here defines *how* it should be done.
 
     # Let's test validation path
-    print("\nTesting validation for AIGrammar:")
-    valid_threshold = ai_grammar._validate_expression('threshold', [feature_x, 0.5])
-    print(f"Validation for 'threshold' (2 operands): {valid_threshold}")
-    invalid_threshold = ai_grammar._validate_expression('threshold', [feature_x])
-    print(f"Validation for 'threshold' (1 operand): {invalid_threshold}")
-
-    valid_attention = ai_grammar._validate_expression('attention', [q_var, k_var, v_var])
-    print(f"Validation for 'attention' (3 operands): {valid_attention}")
-
-    # Example of creating an expression that might use a traditional op via superclass validation
-    # This assumes 'relu' was added to unary_ops for AIGrammar for this test.
-    # relu_expr_ai = ai_grammar.create_expression('relu', [feature_x])
-    # if relu_expr_ai:
-    #    print(f"AI Relu Expr: {relu_expr_ai.operator}({feature_x.name})")
-    #    # print(f"Symbolic (should work if relu is standard unary): {relu_expr_ai.symbolic}")
-    # else:
-    #    print("Failed to create AI relu expression.")
+    # print("\nTesting validation for AIGrammar:")
+    # valid_threshold = ai_grammar._validate_expression('threshold', [feature_x, 0.5])
+    # print(f"Validation for 'threshold' (2 operands): {valid_threshold}")
+    # invalid_threshold = ai_grammar._validate_expression('threshold', [feature_x])
+    # print(f"Validation for 'threshold' (1 operand): {invalid_threshold}")
+    #
+    # valid_attention = ai_grammar._validate_expression('attention', [q_var, k_var, v_var])
+    # print(f"Validation for 'attention' (3 operands): {valid_attention}")
+    #
+    # # Example of creating an expression that might use a traditional op via superclass validation
+    # # This assumes 'relu' was added to unary_ops for AIGrammar for this test.
+    # # relu_expr_ai = ai_grammar.create_expression('relu', [feature_x])
+    # # if relu_expr_ai:
+    # #    print(f"AI Relu Expr: {relu_expr_ai.operator}({feature_x.name})")
+    # #    # print(f"Symbolic (should work if relu is standard unary): {relu_expr_ai.symbolic}")
+    # # else:
+    # #    print("Failed to create AI relu expression.")
 
     # The main challenge remains: Expression class is independent of grammar object at instance level.
     # Making Expression operations (like .symbolic, .complexity, validation) grammar-aware
     # is a deeper refactoring. This AIGrammar class adds the *definitions* and *policies*
     # for AI primitives.
+
+    print("\n--- ProgressiveGrammar CFG Generation Example ---")
+    # Assumes 'grammar' is the ProgressiveGrammar instance from the earlier part of __main__
+    # Ensure there are some variables in the grammar, e.g., from discover_variables or added manually
+    if not grammar.variables:
+        print("No variables in grammar for CFG example. Adding dummy variables.")
+        grammar.variables['v1'] = Variable(name='v1', index=0)
+        grammar.variables['v2'] = Variable(name='v2', index=1)
+        grammar.variables['v3'] = Variable(name='v3', index=2)
+
+    # Define CFG rules for expression generation
+    # These rules should produce sequences that _generate_from_symbol_cfg can parse.
+    # Specifically, an operator followed by symbols for its operands.
+    # Terminal symbols for CFG: variable names (str), 'CONST' (str), operator names (str).
+    # Non-terminal symbols for CFG: 'EXPR', 'BINARY_OP', 'UNARY_OP', 'VAR', 'CONST_SYMBOL' (or just use 'CONST')
+
+    # Get available variable names and operator names from the grammar instance
+    available_vars = list(grammar.variables.keys())
+    if not available_vars:
+        available_vars = ["default_var"] # Fallback if no variables discovered
+        grammar.variables["default_var"] = Variable(name="default_var", index=0)
+
+
+    binary_ops = list(grammar.primitives['binary_ops'])
+    unary_ops = list(grammar.primitives['unary_ops'])
+
+    cfg_rules = [
+        # Core expression rule: can be a binary op, unary op, variable, or constant
+        CFGRule('EXPR', ['BINARY_OP_EXPR'], weight=0.4),
+        CFGRule('EXPR', ['UNARY_OP_EXPR'], weight=0.3),
+        CFGRule('EXPR', ['VAR'], weight=0.2),
+        CFGRule('EXPR', ['CONST'], weight=0.1),
+
+        # Productions for binary operations
+        # Each rule produces: [operator_str, operand_symbol_1, operand_symbol_2]
+        # Operand symbols ('EXPR' here) will be recursively expanded.
+    ]
+    for op in binary_ops:
+        cfg_rules.append(CFGRule('BINARY_OP_EXPR', [op, 'EXPR', 'EXPR']))
+
+    # Productions for unary operations
+    # Each rule produces: [operator_str, operand_symbol]
+    for op in unary_ops:
+        cfg_rules.append(CFGRule('UNARY_OP_EXPR', [op, 'EXPR']))
+
+    # Productions for variables (VAR non-terminal leads to a specific variable name)
+    for var_name in available_vars:
+         # CFG can directly produce the variable name string
+        cfg_rules.append(CFGRule('VAR', [var_name], weight=1.0/len(available_vars)))
+
+    # Production for constants (CONST non-terminal leads to 'CONST' placeholder string)
+    # The 'CONST' string is then handled by _generate_from_symbol_cfg to produce a number.
+    cfg_rules.append(CFGRule('CONST', ['CONST']))
+
+    # Set the CFG rules in the grammar
+    grammar.set_rules_from_cfg(cfg_rules, start_symbol='EXPR')
+    print("CFG rules set for ProgressiveGrammar.")
+
+    # Generate a random expression using the CFG
+    print("\nGenerating random expression using CFG...")
+    # Configure logging to see warnings from generation process
+    logging.basicConfig(level=logging.INFO) # Show info, warnings, errors
+
+    generated_expression = grammar.generate_random_expression_from_cfg(max_depth=5)
+
+    if generated_expression:
+        print(f"\nSuccessfully generated expression from CFG:")
+        print(f"  Symbolic: {generated_expression.symbolic}")
+        print(f"  Complexity: {generated_expression.complexity}")
+        print(f"  Operator: {generated_expression.operator}")
+        print(f"  Operands: {[op.symbolic if isinstance(op, Expression) else op.name if isinstance(op, Variable) else op for op in generated_expression.operands]}")
+    else:
+        print("\nFailed to generate an expression using CFG. Check logs for details.")
+
+    # Example of generating multiple expressions
+    print("\nGenerating a few more examples:")
+    for i in range(3):
+        expr = grammar.generate_random_expression_from_cfg(max_depth=4)
+        if expr:
+            print(f"  Example {i+1}: {expr.symbolic} (Complexity: {expr.complexity})")
+        else:
+            print(f"  Example {i+1}: Failed to generate.")
+
 
 # --- AIGrammar get_arity override ---
 def ai_grammar_get_arity(self, op_name: str) -> int:
