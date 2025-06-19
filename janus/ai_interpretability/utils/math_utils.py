@@ -1,6 +1,41 @@
+import sympy as sp
+from typing import Dict
 import time
 import inspect
 import functools
+
+def calculate_symbolic_accuracy(expr_str: str, ground_truth_map: Dict[str, sp.Expr]) -> float:
+    """
+    Checks if a given string expression is symbolically equivalent to any of the
+    ground truth expressions.
+
+    Args:
+        expr_str: The string representation of the discovered expression.
+        ground_truth_map: A dictionary where keys are names and values are the
+                          ground truth SymPy expression objects.
+
+    Returns:
+        1.0 if the expression is equivalent to a ground truth expression, 0.0 otherwise.
+    """
+    if not expr_str:
+        return 0.0
+
+    try:
+        # Attempt to parse the discovered expression string into a SymPy object
+        discovered_expr = sp.sympify(expr_str)
+
+        # Iterate through all ground truth expressions and check for equality
+        for true_expr in ground_truth_map.values():
+            # .equals() checks for symbolic equivalence, which is more robust than ==
+            if discovered_expr.equals(true_expr):
+                return 1.0  # Found a match
+
+    except (sp.SympifyError, SyntaxError, TypeError):
+        # If parsing fails, the expression is invalid and thus not accurate
+        return 0.0
+
+    # If no match was found after checking all ground truth expressions
+    return 0.0
 
 def validate_inputs(func):
     """
