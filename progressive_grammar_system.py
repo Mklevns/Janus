@@ -1189,75 +1189,74 @@ class AIGrammar(ProgressiveGrammar):
         # Fallback
         return f"EmbeddingLookup({indices}, {embedding_matrix})"
 
+    def _is_tensor_compatible(self, operand: Any) -> bool:
+        """Check if operand can be treated as tensor-like."""
+        return isinstance(operand, (Expression, Variable, np.ndarray, list, sp.Expr, int, float))
+
     def _to_sympy(self, expr_node: Expression) -> sp.Expr:
-        # ... (existing implementation for other custom callable ops)
-        if expr_node.operator in self.primitives.get('custom_callable_ops', {}):
-            func_name = expr_node.operator
-            sympy_operands = []
-            for op_node in expr_node.operands:
-                if isinstance(op_node, Expression):
-                    sympy_operands.append(self._to_sympy(op_node))
-                elif isinstance(op_node, Variable):
-                    sympy_operands.append(op_node.symbolic)
-                elif isinstance(op_node, (int, float)):
-                    sympy_operands.append(sp.Number(op_node))
-                elif isinstance(op_node, str):
-                    sympy_operands.append(sp.Symbol(op_node))
-                else:
-                    sympy_operands.append(sp.Symbol(str(op_node)))
+        """
+        Converts an Expression node to its Sympy representation, handling AI primitives.
+        """
+        operator = expr_node.operator
 
-            if func_name == 'if_then_else' and len(sympy_operands) == 3:
-                return sp.Function(func_name)(*sympy_operands)
-            elif func_name == 'threshold' and len(sympy_operands) == 2:
-                return sympy_operands[0] > sympy_operands[1]
+        # Let parent handle terminals
+        if operator in ['var', 'const']:
+            return super()._to_sympy(expr_node)
 
-            # Add handling for attention and embedding
-            if func_name == 'attention':
-                return sp.Function('Attention')(*sympy_operands)
-            # func_name will be 'embedding' as per the new requirement
-            if func_name == 'embedding':
-                return sp.Function('Embedding')(*sympy_operands)
+        # Convert operands recursively
+        sympy_operands = []
+        for op in expr_node.operands:
+            if isinstance(op, Expression):
+                sympy_operands.append(self._to_sympy(op))
+            elif isinstance(op, Variable):
+                sympy_operands.append(op.symbolic)
+            elif isinstance(op, (int, float)):
+                sympy_operands.append(sp.Number(op))
+            elif isinstance(op, str):
+                sympy_operands.append(sp.Symbol(op))
+            else:
+                sympy_operands.append(sp.Symbol(str(op)))
 
-            return sp.Function(func_name)(*sympy_operands)
+        # Handle standard operators known to SymPy
+        if operator in ['+', '-', '*', '/', '**', 'sin', 'cos', 'exp', 'log']:
+             return super()._to_sympy(expr_node) # Can still use parent logic for actual creation
 
-        raise NotImplementedError(f"Operator '{expr_node.operator}' not handled by AIGrammar._to_sympy policy.")
+        # Handle custom AI operators
+        elif operator == 'if_then_else':
+            return sp.Piecewise((sympy_operands[1], sympy_operands[0]), (sympy_operands[2], True))
+        elif operator == 'threshold':
+            return sympy_operands[0] > sympy_operands[1]
+        else:
+            # Generic handling for other custom functions (relu, gelu, attention, etc.)
+            return sp.Function(operator.capitalize())(*sympy_operands)
 
-    def _validate_expression(self, operator: str, operands: List[Any]) -> bool: # Overriding
+    def _validate_expression(self, operator: str, operands: List[Any]) -> bool:
         """
         Validate syntactic correctness of expression, extended for AI primitives.
         """
-        # Handle AI custom callable operators
-        if operator in self.primitives.get('custom_callable_ops', {}):
-            # Basic validation: check if operator is known
-            # Arity checks would be specific to each custom op.
-            # Example: 'if_then_else' needs 3 operands, 'threshold' needs 2.
-            # This needs to be made more robust, perhaps by storing arity with primitives.
-            if operator == 'if_then_else':
-                if len(operands) != 3: return False
-                # Further type checks: cond (bool), true_val, false_val (any type)
-            elif operator == 'threshold':
-                if len(operands) != 2: return False
-                # Further type checks: x (numeric), t (numeric)
-            elif operator == 'weighted_sum':
-                if len(operands) != 2: return False # weights_list, values_list
-            elif operator == 'max_pool':
-                if len(operands) != 1: return False # values_list
-            elif operator == 'attention': # Q, K, V
-                if len(operands) != 3: return False
-            elif operator == 'embedding_lookup': # indices, matrix
-                if len(operands) != 2: return False
-            # Assume valid if basic arity (if checked) passes. More detailed type checking can be added.
-            return True
+        # Defer to parent class for standard validation
+        if not super()._validate_expression(operator, operands):
+            return False
 
-        # Handle activation functions if they are treated as operators (e.g., unary)
-        # If 'relu' is in `self.primitives['unary_ops']` (added by user or a setup method)
-        # then super()._validate_expression should handle it.
-        # The current AIGrammar adds 'activation_types' as a list of strings,
-        # not as operators. If they become operators, they need to be added to unary_ops etc.
-        # e.g., self.primitives['unary_ops'].update(self.primitives['custom_sets']['activation_types'])
-        # For now, assuming they are not operators in this validation path.
+        ai_operator_arity = {
+            'attention': 3, 'embedding_lookup': 2, 'if_then_else': 3,
+            'threshold': 2, 'weighted_sum': 2, 'max_pool': 2,
+            'layer_norm': 1, 'residual': 2, 'gelu': 1, 'relu': 1,
+            'sigmoid': 1, 'tanh': 1, 'softmax': 1,
+        }
 
-        return super()._validate_expression(operator, operands)
+        if operator not in self.primitives.get('custom_callable_ops', {}) and \
+           operator not in ai_operator_arity:
+            return True # Handled by parent
+
+        expected_arity = ai_operator_arity.get(operator)
+        if expected_arity is not None and len(operands) != expected_arity:
+            return False
+
+        if operator == 'attention':
+            return all(self._is_tensor_compatible(op) for op in operands)
+
+        return True
 
     # Note: _expression_key might also need overriding if these new operators
     # have specific canonicalization needs (e.g., commutativity, though unlikely for these).
