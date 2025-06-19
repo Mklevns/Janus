@@ -6,13 +6,18 @@ Defines reward components tailored for evaluating the interpretability
 of symbolic expressions that aim to explain AI model behavior.
 """
 
-from typing import Any, Dict, Optional # Optional added for clarity
+import numpy as np
+import torch
+from sklearn.metrics import mean_squared_error
+import sympy as sp
+from typing import Any, Dict, Optional, List # Add List if not present
+
 # Assuming Expression class will be available, e.g., from progressive_grammar_system
 # from progressive_grammar_system import Expression
 # For now, using Any for Expression type hint if not directly importable yet
 ExpressionType = Any
 AIModelType = Any # Placeholder for AI Model type
-TestDataTyp = Any # Placeholder for Test Data type, likely np.ndarray or torch.Tensor
+TestDataTyp = np.ndarray # Placeholder for Test Data type, likely np.ndarray or torch.Tensor
 
 class InterpretabilityReward:
     """
@@ -99,23 +104,49 @@ class InterpretabilityReward:
 
         return total_reward
 
-    def _calculate_fidelity(self,
-                            expression: ExpressionType,
-                            ai_model: AIModelType,
-                            test_data: TestDataTyp
-                           ) -> float:
+    def _calculate_fidelity(self, expression: ExpressionType, ai_model: AIModelType, test_data: np.ndarray) -> float:
         """
-        Placeholder for calculating the fidelity score.
-        Fidelity measures how well the symbolic expression's output matches
-        the AI model's output (or relevant internal component) on the test_data.
+        Calculate how well the symbolic expression matches the AI model's behavior.
+        Returns a score between 0 and 1, where 1 is perfect fidelity.
         """
-        print(f"INFO: InterpretabilityReward._calculate_fidelity called for expr. (complexity {getattr(expression, 'complexity', 'N/A')}). Placeholder.")
-        # Example:
-        # 1. Get predictions from the symbolic expression on test_data inputs.
-        # 2. Get corresponding outputs from the AI model (or its target component) on test_data inputs.
-        # 3. Compare them (e.g., using Mean Squared Error, R-squared, correlation, or classification accuracy).
-        # 4. Normalize the score (e.g., higher is better, typically in [0, 1] or similar range).
-        return 0.75 # Dummy value
+        try:
+            # Get model predictions as the ground truth
+            ai_predictions = self._get_interpretation_target(ai_model, test_data)
+
+            # Evaluate expression on the same inputs
+            expr_predictions = self._evaluate_expression_on_data(expression, test_data)
+
+            if expr_predictions is None or len(expr_predictions) != len(ai_predictions):
+                return 0.0
+
+            # Filter out NaN values
+            valid_mask = ~(np.isnan(expr_predictions) | np.isnan(ai_predictions))
+            if not np.any(valid_mask):
+                return 0.0
+
+            expr_valid = expr_predictions[valid_mask]
+            ai_valid = ai_predictions[valid_mask]
+
+            # Calculate correlation (primary metric)
+            if len(expr_valid) >= 2:
+                correlation = np.corrcoef(expr_valid, ai_valid)[0, 1]
+                correlation = max(0, correlation) if not np.isnan(correlation) else 0.0
+            else:
+                correlation = 0.0
+
+            # Calculate normalized MSE (secondary metric)
+            mse = mean_squared_error(ai_valid, expr_valid)
+            ai_variance = np.var(ai_valid)
+            normalized_mse = 1.0 / (1.0 + mse / (ai_variance + 1e-10))
+
+            # Combine metrics (weighted average)
+            fidelity = 0.7 * correlation + 0.3 * normalized_mse
+
+            return float(fidelity)
+
+        except Exception as e:
+            print(f"Error in fidelity calculation: {e}")
+            return 0.0
 
     def _calculate_simplicity(self, expression: ExpressionType) -> float:
         """
@@ -142,22 +173,42 @@ class InterpretabilityReward:
         return max(0, simplicity_score) # Ensure simplicity isn't < 0
 
 
-    def _test_consistency(self,
-                          expression: ExpressionType,
-                          ai_model: AIModelType,
-                          test_data: TestDataTyp # Could be all data, or a specific hold-out set
-                         ) -> float:
+    def _test_consistency(self, expression: ExpressionType, ai_model: AIModelType, test_data: np.ndarray) -> float:
         """
-        Placeholder for testing the consistency or generalization of the expression.
-        This could involve evaluating the expression on different subsets of data,
-        under slight perturbations of inputs, or on out-of-distribution samples.
+        Test how consistently the expression performs across different data subsets.
+        Uses k-fold validation approach to measure consistency.
         """
-        print(f"INFO: InterpretabilityReward._test_consistency called for expr. (complexity {getattr(expression, 'complexity', 'N/A')}). Placeholder.")
-        # Example:
-        # 1. Split test_data into multiple folds or use a separate generalization set.
-        # 2. Calculate fidelity (or another relevant metric) on each fold/set.
-        # 3. Consistency could be the average fidelity, or low variance in performance across folds.
-        return 0.6 # Dummy value
+        try:
+            features = test_data.inputs if hasattr(test_data, 'inputs') else test_data
+            n_samples = features.shape[0]
+            n_folds = min(5, n_samples // 10) # Ensure reasonable fold size
+
+            if n_folds < 2: # If not enough data for k-fold, fall back to overall fidelity
+                return self._calculate_fidelity(expression, ai_model, test_data)
+
+            fold_scores = []
+            fold_size = n_samples // n_folds
+
+            for i in range(n_folds):
+                start_idx, end_idx = i * fold_size, (i + 1) * fold_size
+                # Create a new TestDataTyp or np.ndarray for the fold
+                # Assuming test_data is a simple np.ndarray of features here based on `features = test_data`
+                fold_data_features = features[start_idx:end_idx]
+                # If test_data was a more complex object, ensure fold_data retains that structure
+                # For simplicity, passing features directly as per new _calculate_fidelity expects np.ndarray
+                fold_score = self._calculate_fidelity(expression, ai_model, fold_data_features)
+                fold_scores.append(fold_score)
+
+            avg_score = np.mean(fold_scores)
+            score_variance = np.var(fold_scores)
+            # Consistency rewards high average score and penalizes high variance
+            consistency = avg_score * (1.0 - min(score_variance, 0.5)) # Cap variance penalty
+
+            return float(consistency)
+
+        except Exception as e:
+            print(f"Error in consistency calculation: {e}")
+            return 0.0
 
     def _calculate_insight_score(self,
                                  expression: ExpressionType,
@@ -165,17 +216,178 @@ class InterpretabilityReward:
                                  additional_context: Optional[Dict[str, Any]] = None
                                 ) -> float:
         """
-        Placeholder for calculating an insightfulness score.
-        This is highly subjective and might involve heuristics like:
-        - Presence of known meaningful symbolic patterns (e.g., conservation laws from physics).
-        - Novelty compared to a library of known expressions.
-        - Reduction in complexity compared to other high-fidelity expressions.
-        - Identification of key variables or interactions.
+        Calculate the insightfulness of the discovered expression.
         """
-        print(f"INFO: InterpretabilityReward._calculate_insight_score called for expr. (complexity {getattr(expression, 'complexity', 'N/A')}). Placeholder.")
-        # This is the most challenging component to automate.
-        # Could involve pattern matching, comparison to human knowledge bases, etc.
-        return 0.5 # Dummy value
+        if expression is None or not hasattr(expression, 'symbolic'):
+            return 0.0
+
+        insight_score = 0.0
+        # Ensure expression.symbolic is a string for pattern matching
+        expr_str = str(expression.symbolic)
+
+        # Define known patterns and their scores
+        known_patterns = {
+            'exp(-': 0.3, 'log(': 0.2, '**2': 0.1,
+            'sin(': 0.2, 'cos(': 0.2, 'Attention(': 0.4 # Example for a domain-specific pattern
+        }
+        for pattern, score in known_patterns.items():
+            if pattern in expr_str:
+                insight_score += score
+
+        # Score based on complexity (less complex is often more insightful)
+        complexity = getattr(expression, 'complexity', len(expr_str) / 10) # Default if no attr
+        if complexity < 5: insight_score += 0.2
+        elif complexity < 10: insight_score += 0.1
+
+        # Score based on number of free symbols (variables)
+        if hasattr(expression, 'symbolic') and hasattr(expression.symbolic, 'free_symbols'):
+            free_symbols = expression.symbolic.free_symbols
+            if len(free_symbols) >= 2: insight_score += 0.1
+            # Interaction term bonus
+            if '*' in expr_str and len(free_symbols) >= 2: insight_score += 0.1 # Simple check for interaction
+
+        # Use additional context if provided (e.g., important features from domain knowledge)
+        if additional_context:
+            important_features = additional_context.get('important_features', [])
+            for feature in important_features:
+                if str(feature) in expr_str: # Ensure feature is string for search
+                    insight_score += 0.1
+
+        return min(1.0, insight_score) # Cap score at 1.0
+
+    def _get_interpretation_target(self, ai_model: AIModelType, features: np.ndarray) -> np.ndarray:
+        """
+        Extract specific interpretation target from the model.
+        This might involve hooks if targeting internal states (e.g., attention).
+        """
+        ai_model.eval() # Ensure model is in evaluation mode
+        extracted_values: List[np.ndarray] = [] # Explicitly list of numpy arrays
+
+        # Example for attention, assuming self.interpretation_target is set in __init__ or elsewhere
+        # This target_str logic needs to be robust.
+        target_str = getattr(self, 'interpretation_target', 'output') # Default to 'output'
+
+        if target_str.startswith('attention'):
+            # This part is highly model-specific. The example assumes a Transformer-like model.
+            # It needs access to ai_model's internal structure (e.g., layers, attention heads).
+            try:
+                parts = target_str.split('_') # e.g., "attention_layer0_head2"
+                layer_idx = int(parts[1].replace('layer', ''))
+                head_idx = int(parts[2].replace('head', ''))
+
+                # Define the hook function
+                def attention_hook(module, input, output):
+                    # Output structure depends on the model.
+                    # For many HuggingFace Transformers, output[1] is attention_weights.
+                    # (batch_size, num_heads, seq_len, seq_len)
+                    attn_weights = output[1]
+                    # Select specific head, detach, move to CPU, convert to numpy
+                    extracted_values.append(attn_weights[:, head_idx, :, :].detach().cpu().numpy())
+
+                # Register the hook: This path to the attention mechanism is an EXAMPLE.
+                # It must be adapted to the actual model architecture.
+                # e.g., model.transformer.h[layer_idx].attn.register_forward_hook(attention_hook)
+                # Or for BERT: model.bert.encoder.layer[layer_idx].attention.self.register_forward_hook(attention_hook)
+                # This requires knowing the model structure. For a generic solution, this is hard.
+                # We'll assume a path like `ai_model.transformer.h[layer_idx].attn` for now.
+                target_module = ai_model.transformer.h[layer_idx].attn
+                hook = target_module.register_forward_hook(attention_hook)
+
+                with torch.no_grad():
+                    # Input to the model should be a tensor.
+                    # Assuming features are token IDs if it's a language model.
+                    _ = ai_model(torch.tensor(features, dtype=torch.long))
+
+                hook.remove() # Important to remove hooks after use
+
+                if extracted_values:
+                    # Concatenate if multiple batches/segments were processed by the hook
+                    result = np.concatenate(extracted_values, axis=0)
+                    # Post-process attention: e.g., max attention value per input sample
+                    # This aggregation (max over seq_len, seq_len) is an example.
+                    return np.max(result, axis=(-1, -2))
+                return np.zeros(features.shape[0]) # Return zeros if no values extracted
+            except AttributeError as e:
+                print(f"AttributeError in attention hook setup: {e}. Model structure might not match expected path.")
+                # Fallback to model's final output if hook fails
+                with torch.no_grad():
+                    # Assuming features are appropriate for direct model input
+                    output = ai_model(torch.tensor(features, dtype=torch.long))
+                    # Adjust based on actual model output structure
+                    return output.detach().cpu().numpy() if hasattr(output, 'detach') else np.array(output)
+
+            except Exception as e:
+                print(f"Error during attention extraction: {e}")
+                return np.zeros(features.shape[0]) # Fallback
+        else:
+            # Default to model's final output if not 'attention'
+            with torch.no_grad():
+                # Assuming features are appropriate for direct model input
+                # Input needs to be a tensor
+                model_input = torch.tensor(features, dtype=torch.long if features.ndim == 1 or features.dtype == np.int_ else torch.float32)
+                output = ai_model(model_input)
+                # Ensure output is a numpy array
+                if hasattr(output, 'logits'): # Common for HuggingFace classification models
+                    output = output.logits
+                return output.detach().cpu().numpy()
+
+    def _evaluate_expression_on_data(self, expression: ExpressionType, features: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Evaluates the symbolic expression on the given data.
+        'expression' is assumed to have a 'symbolic' attribute (sympy expression)
+        and 'free_symbols'.
+        'features' is a NumPy array where columns correspond to variables.
+        """
+        try:
+            if not hasattr(expression, 'symbolic') or not hasattr(expression.symbolic, 'free_symbols'):
+                print("Expression does not have 'symbolic' attribute or 'free_symbols'.")
+                return None
+
+            # Get the free symbols (variables) from the sympy expression
+            symbols = list(expression.symbolic.free_symbols)
+
+            # Create a callable function from the sympy expression
+            # Using 'numpy' module for numerical evaluation
+            func = sp.lambdify(symbols, expression.symbolic, 'numpy')
+
+            # The 'features' np.ndarray needs to be mapped to these symbols.
+            # This assumes that the order of columns in 'features' matches the
+            # order of symbols in 'symbols' if expression.input_variables is not available.
+            # A more robust way is to have metadata about feature columns.
+            # For now, let's assume 'features' has columns in an order that can be passed to func.
+            # If `expression` has an `input_variables` attribute (list of symbol names in order), use it.
+
+            # Example: if symbols are [x, y] and features is N x M (M >= 2)
+            # We need to select columns corresponding to x and y.
+            # This part is tricky without knowing how feature names map to sympy symbols.
+            # Simplest assumption: features.shape[1] == len(symbols) and order matches.
+
+            if features.shape[1] < len(symbols):
+                print(f"Not enough feature columns ({features.shape[1]}) for symbols ({len(symbols)}).")
+                return None
+
+            # Pass each column of features as a separate argument to the lambdified function
+            # This means if func expects (x, y), we call func(features[:,0], features[:,1])
+            feature_columns = [features[:, i] for i in range(len(symbols))]
+            predictions = func(*feature_columns)
+
+            # Ensure predictions are a numpy array
+            if not isinstance(predictions, np.ndarray):
+                predictions = np.array(predictions)
+
+            # If predictions is scalar (e.g. due to single feature column and single data point), make it 1D array
+            if predictions.ndim == 0:
+                predictions = predictions.reshape(1)
+            # If the function evaluated to a constant for all inputs, it might return a scalar
+            # We need to broadcast it to the shape of the input data's first dimension (number of samples)
+            if predictions.size == 1 and features.shape[0] > 1:
+                 predictions = np.full(features.shape[0], predictions.item())
+
+            return predictions
+
+        except Exception as e:
+            print(f"Error evaluating expression on data: {e}")
+            return None # Return None or raise error
 
     def combine_rewards(self, **kwargs: float) -> float:
         """
