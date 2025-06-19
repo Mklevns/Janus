@@ -1,5 +1,5 @@
 """
-Fixed InterpretabilityReward Implementation
+InterpretabilityReward Implementation
 =========================================
 
 This implements the critical placeholder methods in InterpretabilityReward
