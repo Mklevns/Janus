@@ -137,6 +137,25 @@ class Expression:
         # Fallback
         return sp.Symbol(f"Unknown({self.operator})")
 
+    def clone(self) -> 'Expression':
+        """Create a deep copy of this expression tree."""
+        cloned_operands = []
+        for op in self.operands:
+            if isinstance(op, Expression):
+                cloned_operands.append(op.clone())
+            elif isinstance(op, Variable):
+                # Variables are shared. If Variable instances could be mutated
+                # in a way that cloning should prevent, then they would need
+                # a .clone() method or deepcopy. For now, assume they are
+                # effectively immutable or safe to share post-cloning.
+                cloned_operands.append(op)
+            else:
+                # Basic types like int, float, str are immutable and can be copied directly.
+                cloned_operands.append(op)
+
+        # Create a new Expression instance.
+        # The __post_init__ method will correctly set complexity and symbolic form.
+        return Expression(operator=self.operator, operands=cloned_operands)
 
 
 @dataclass
@@ -519,9 +538,9 @@ class ProgressiveGrammar:
 
         count = 0
         if hasattr(expr, 'operands'):
-            for op in expr.operands:
-                if isinstance(op, Expression):
-                    count += self._count_subexpression(op, pattern)
+            for op_node in expr.operands: # Renamed op to op_node to avoid conflict
+                if isinstance(op_node, Expression):
+                    count += self._count_subexpression(op_node, pattern)
 
         return count
 
@@ -536,15 +555,15 @@ class ProgressiveGrammar:
             return expr # If a string operand somehow gets here
         else:
             operand_keys = []
-            for op in expr.operands:
-                if isinstance(op, Expression):
-                    operand_keys.append(self._expression_key(op))
-                elif isinstance(op, Variable): # Explicitly handle Variable in operands
-                    operand_keys.append(f"var:{op.name}")
-                elif isinstance(op, (int, float)): # Explicitly handle const in operands
-                    operand_keys.append(f"const:{float(op):.6g}")
+            for op_node in expr.operands: # Renamed op to op_node to avoid conflict
+                if isinstance(op_node, Expression):
+                    operand_keys.append(self._expression_key(op_node))
+                elif isinstance(op_node, Variable): # Explicitly handle Variable in operands
+                    operand_keys.append(f"var:{op_node.name}")
+                elif isinstance(op_node, (int, float)): # Explicitly handle const in operands
+                    operand_keys.append(f"const:{float(op_node):.6g}")
                 else:
-                    operand_keys.append(str(op)) # Fallback for other types
+                    operand_keys.append(str(op_node)) # Fallback for other types
 
             if expr.operator in self.COMMUTATIVE_OPS:
                 operand_keys.sort() # Sort keys for commutative operators
@@ -597,10 +616,10 @@ class ProgressiveGrammar:
             result.append(expr)
 
             if hasattr(expr, 'operands'):
-                for op in expr.operands:
-                    if isinstance(op, Expression):
+                for op_node in expr.operands: # Renamed op to op_node to avoid conflict
+                    if isinstance(op_node, Expression):
                         result.extend(
-                            self._extract_all_subexpressions(op, collected)
+                            self._extract_all_subexpressions(op_node, collected)
                         )
 
         return result
@@ -630,10 +649,10 @@ class ProgressiveGrammar:
         return {
             'operator': expr.operator,
             'operands': [
-                self._expression_to_dict(op) if isinstance(op, Expression)
-                else {'type': 'var', 'name': op.name} if isinstance(op, Variable)
-                else {'type': 'const', 'value': op}
-                for op in expr.operands
+                self._expression_to_dict(op_node) if isinstance(op_node, Expression) # Renamed op to op_node
+                else {'type': 'var', 'name': op_node.name} if isinstance(op_node, Variable) # Renamed op to op_node
+                else {'type': 'const', 'value': op_node} # Renamed op to op_node
+                for op_node in expr.operands # Renamed op to op_node
             ],
             'complexity': expr.complexity
         }
@@ -777,17 +796,17 @@ class AIGrammar(ProgressiveGrammar):
 
             # Recursively convert operands to Sympy expressions
             sympy_operands = []
-            for op in expr_node.operands:
-                if isinstance(op, Expression):
-                    sympy_operands.append(self._to_sympy(op))
-                elif isinstance(op, Variable):
-                    sympy_operands.append(op.symbolic)
-                elif isinstance(op, (int, float)):
-                    sympy_operands.append(sp.Number(op))
-                elif isinstance(op, str): # Could be a string literal or symbolic name
-                    sympy_operands.append(sp.Symbol(op)) # Treat as symbol if string
+            for op_node in expr_node.operands: # Renamed op to op_node
+                if isinstance(op_node, Expression):
+                    sympy_operands.append(self._to_sympy(op_node))
+                elif isinstance(op_node, Variable):
+                    sympy_operands.append(op_node.symbolic)
+                elif isinstance(op_node, (int, float)):
+                    sympy_operands.append(sp.Number(op_node))
+                elif isinstance(op_node, str): # Could be a string literal or symbolic name
+                    sympy_operands.append(sp.Symbol(op_node)) # Treat as symbol if string
                 else: # Fallback for unknown operand types
-                    sympy_operands.append(sp.Symbol(str(op)))
+                    sympy_operands.append(sp.Symbol(str(op_node)))
 
             # Handle specific lambda functions for more precise Sympy representation if possible
             if func_name == 'if_then_else' and len(sympy_operands) == 3:
